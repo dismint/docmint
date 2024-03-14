@@ -1,0 +1,1 @@
+/home/dismint/dismintjjc/template.typ
