@@ -1,2 +1,7 @@
 # ignore all pdf files
 *.pdf
+
+# ignore all template files except the base
+template.typ
+!/template.typ
+
