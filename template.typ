@@ -51,8 +51,8 @@
   grid(
     columns: (47%, 47%),
     column-gutter: 6%,
-    body_l,
-    body_r,
+    align(horizon)[#body_l],
+    align(horizon)[#body_r],
   )
 }
 
@@ -67,14 +67,6 @@
   width: 100%
 ) = {
   rect(image(path, width: width), stroke: 0.5em, radius: 0.2em)
-}
-
-#let num() = {
-  set math.equation(numbering: "(1)")
-}
-
-#let dnum() = {
-  set math.equation(numbering: none)
 }
 
 // template
@@ -115,7 +107,7 @@
     fill: if dark { rgb("0c0c0c") } else {},
     numbering: "1 / 1",
   ) 
-  // only set the header on the second page onward10% } else { 5% },
+  // only set the header on the second page onward
   set page(header: locate(loc => {
     if counter(page).at(loc).first() > 1 and pset [
       *#title*
