@@ -51,6 +51,18 @@
   grid(
     columns: (47%, 47%),
     column-gutter: 6%,
+    body_l,
+    body_r,
+  )
+}
+
+#let twocola(
+  body_l,
+  body_r
+) = {
+  grid(
+    columns: (47%, 47%),
+    column-gutter: 6%,
     align(horizon)[#body_l],
     align(horizon)[#body_r],
   )
