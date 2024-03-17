@@ -117,5 +117,6 @@ How do we actually tell something is linearizable? History $bold(H)$ can be cons
   [
     The end result should be a legal sequential history where all orderings in $bold(G)$ fall under a subset of some legal sequential history $bold(S)$
   ],
-  bimg("img/subset.png")
+  [temp]
+  // bimg("img/subset.png")
 )
