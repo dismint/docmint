@@ -89,9 +89,15 @@ We can view this history in terms of *projections*, such as an object or thread 
 An invocation is pending if it has no matching response.
 
 #define(
+  title: "Sequential Histories"
+)[
+  A history is sequential if method calls of different threads to do not interleave.
+]
+
+#define(
   title: "Well-Formed Concurrent History"
 )[
-  If the thread projections are sequential, then it is concurrently well-formed.
+  If the thread projections are sequential, then it is concurrently well-formed. This can be seen as a weaker form of the above definition.
 ]
 
 #define(
@@ -99,3 +105,17 @@ An invocation is pending if it has no matching response.
 )[
   If the thread projections are the same for every thread, then the two executions are *equal*, even if the interleaving of the operations was different.
 ]
+
+== Linearizability
+
+How do we actually tell something is linearizable? History $bold(H)$ can be considered linearizable if it can be extended to another history $bold(G)$ by:
+
+- Appending zero more more responses to pending invocations
+- Discarding other pending invocations
+
+#twocol(
+  [
+    The end result should be a legal sequential history where all orderings in $bold(G)$ fall under a subset of some legal sequential history $bold(S)$
+  ],
+  bimg("img/subset.png")
+)
