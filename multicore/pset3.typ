@@ -65,9 +65,15 @@ If infinitely many method calls are completed in an infinite execution, that mea
 
 === $S_1 => S_2$
 
+If a system is deadlock free, that means there at least one thread will make acquire the lock and progress the system. This does *not* mean that we can guarantee an infinite number of steps in the execution, simply because we had some number of steps in the infinite history $bold(H)$
 
+== (c)
 
-=== $S_2 => S_1$
+This does imply wait-free. We want to ensure that every thread will make some progress in a non-infinite amount of time (i.e. that no thread takes an infinite amount of steps by waiting without ever completing a method call), which is fulfilled by the statement's promise that no thread that takes an infinite amount of steps will not complete an infinite amount of method calls.
+
+== (d)
+
+These are not equivalent. Starvation freedom requires that every thread that tries to call the method will eventually complete it, and this statement is stronger than this requirement because it guarantees that every single thread in will eventually complete an infinite amount of method calls.
 
 = Problem 3
 
@@ -191,7 +197,13 @@ This of course, is synonymous to saying our linearization point for `write()` oc
   [
     === Mutual Exclusion
 
-    Safe registers pose more of a threat, because they are not responsible for what happens when a `read` collides with a `write`. That is, they can return anything of their choosing when a `read` comes in during a `write`. As discussed above, this doesn't change much for the label array, is the value does not matter until the statement is finished. However, the label array needs more consideration as other competeing threads may be trying to read this value, for example a thread might read a much lower value than what is actually present. All this does however, is potentially give too low of a label to any given thread. This does not impact the mutual exclusion.
+    Safe registers pose more of a threat, because they are not responsible for what happens when a `read` collides with a `write`. That is, they can return anything of their choosing when a `read` comes in during a `write`. As discussed above, this doesn't change much for the flag array, is the value does not matter until the statement is finished. However, the label array needs more consideration as other competeing threads may be trying to read this value, for example a thread might read a much lower value than what is actually present. Consider the following case:
+
+    + Two threads attempt to acquire the lock, thread `1` has the previously maximal value.
+    + Thread `1` attempts to write its new value as `label[1]+1`
+    + Thread `2` writes its new value as `label[1]+1`
+    + Thread `2` enters the critical section, since reads thread `1`s label as something much lower.
+    + Thread `1` enters the critical section, since it has the same label, but lower id than `2`
   ],
   [
     === First-Come-First-Served
@@ -206,7 +218,7 @@ This of course, is synonymous to saying our linearization point for `write()` oc
   [
     === Mutual Exclusion
 
-    Similarly to the discussion in the mutual exclusion section of the safe register, there is no significant danger to the mutual exclusion of the algorithm.
+    Suppose there is a thread in the critical section who has a label of $v$. If another thread comes in and tries to acquire the lock, they will succeed, as their label will be $0$ instead of $v+1$
   ],
   [
     === First-Come-First-Served
@@ -215,10 +227,565 @@ This of course, is synonymous to saying our linearization point for `write()` oc
 
     + Thread `1` is the only thread with the label `5`, thread `2` has label `4`
     + Thread `2` attempts to secure the lock, and as a result, its label is set to `0`
-    + Thread `2` attempts to secure the lock, and as a result, its label is set to `5`
+    + Thread `1` attempts to secure the lock, and as a result, its label is set to `0`
+    + Despite thread `2` finishing its process first, thread `1` will get let in earlier.
   ],
 )
 
 = Problem 8
 
+We are able to use an almost identical solution from problem 5. The crux of the design will revolve around $3 dot log(M)$ registers.
 
+When a `write()` happens, it will copy the binary representation of the number number into the first $log(M)$ registers, before repeating the same process for the other two blocks.
+
+When a `read()` happens, it will read in reverse order in three batches, and employ the same algorithm found in problem 5, returning a consistent value of either the new or old register.
+
+The correctness of this approach is the exact same as the aforementioned proof and stands for this problem as well. Because there is at most one write at a time, the solution does not functionally differ from that of the fifth problem. There are problems with multiple writes, but the premise of the question allows us to ignore this hindrance. 
+
+= Problem 9
+
+#note(
+  title: "Code for Problem 9"
+)[
+  I have inserted appropriate code in their respective section, and any other miscellaneous files such as the tester have gone in at the end. All included comments have been omitted for brevity, but comments that I have added are left in to demonstrate understanding. I am still unsure whether this is allowed or not since I have yet to receive feedback on the last code submission.
+]
+
+== (a)
+
+The implementation I provided is correct as it simply locks around each of the functions. The lock is shared between the entire instance, so once the snapshot begins, nothing else can possibly interrupt the snapshot. This *does not* mean however, that any pending changes are lost, as they will instead hand and wait for the `scan()` to be over.
+
+The `scan` will necessarily pull from the latest `update()`, and since all values are initialized to `0` manually, if there are no updates, that position in the array will return as `0`.
+
+*`AtomicSnapshot.java`*
+```java
+import java.util.concurrent.atomic.*;
+import java.util.concurrent.locks.*;
+
+class AtomicSnapshot implements Snapshot {
+    protected final AtomicIntegerArray array;
+
+    // added fields
+    private Lock lock;
+    private AtomicInteger n;
+
+    public AtomicSnapshot(int numSlots) {
+        this.n.set(numSlots);
+        this.lock = new ReentrantLock();
+        // initialize array and set all values to 0
+        this.array = new AtomicIntegerArray(this.n.get());
+        for (int i = 0; i < this.n.get(); i++) {
+            this.array.set(i, 0);
+        }
+    }
+
+    public int[] scan() {
+        // lock the function
+        this.lock.lock();
+
+        // critical section, nothing can change
+        int[] arrayCopy = new int[this.n.get()];
+        for (int i = 0; i < this.n.get(); i++) {
+            arrayCopy[i] = this.array.get(i);
+        }
+        // unlock the function
+        this.lock.unlock();
+        // return the generated copy
+        return arrayCopy;
+    }
+
+    public void update(int index, int val) {
+        // lock the function
+        this.lock.lock();
+
+        // critical section
+        this.array.set(index, val);
+
+        // unlock the function
+        this.lock.unlock();
+    }
+}
+```
+
+== (b)
+
+The code for this question was generated almost verbatim from the suggested code, and thus all comments have been omitted.
+
+*`SingleScanSnapshot.java`*
+```java
+import java.util.concurrent.atomic.*; // for AtomicXXX classes
+
+class SingleScanSnapshot implements Snapshot {
+    protected final AtomicInteger curSeq;
+    protected final AtomicReferenceArray<Register> high;
+    protected final AtomicReferenceArray<Register> low;
+
+    public SingleScanSnapshot(int numScanners) {
+        curSeq = new AtomicInteger(0);
+        high = new AtomicReferenceArray<Register>(numScanners);
+        low = new AtomicReferenceArray<Register>(numScanners);
+        for (int i = 0; i < numScanners; i++) {
+            high.set(i, new Register());
+            low.set(i, new Register());
+        }
+    }
+
+    public int[] scan() {
+        int len = high.length();
+        int[] view = new int[len];
+        curSeq.set(curSeq.get() + 1);
+        for (int j = 0; j < len; j++) {
+            Register highReg = high.get(j);
+            if (highReg.seq < curSeq.get()) {
+                view[j] = highReg.val;
+            } else {
+                view[j] = low.get(j).val;
+            }
+        }
+        return view;
+    }
+
+    public void update(int processNum, int val) {
+        int seq = curSeq.get();
+        Register highReg = high.get(processNum);
+        if (seq != highReg.seq) {
+            low.set(processNum, highReg);
+        }
+        high.set(processNum, new Register(val, seq));
+    }
+}
+```
+
+== (c)
+
+The only modification that was made around the code from *(b)* was an instance lock that goes around the `scan` function. `update` is still wait free as it has not been tampered with. There is no need to provide any kind of extra security for `update` as it already ran independently, even when colliding with the `scan` calls.
+
+It is necessary that the lock does not interfere with the functionality of the code. Since the `ReentrantLock` serves as an essentially infinite stall if another thread has already acquired the lock, we simulate concurrency and the power for two threads to freely call the `read` function, while retaining the actual functionality and stability of a single process `scan` implementation. 
+
+*`DualScanSnapshot.java`*
+```java
+import java.util.concurrent.atomic.*;
+import java.util.concurrent.locks.*;
+
+class DualScanSnapshot implements Snapshot {
+    protected final AtomicInteger curSeq;
+    protected final AtomicReferenceArray<Register> high;
+    protected final AtomicReferenceArray<Register> low;
+
+    private Lock lock;
+
+    public DualScanSnapshot(int numScanners) {
+        // create new lock
+        this.lock = new ReentrantLock();
+
+        curSeq = new AtomicInteger(0);
+        high = new AtomicReferenceArray<Register>(numScanners);
+        low = new AtomicReferenceArray<Register>(numScanners);
+        for (int i = 0; i < numScanners; i++) {
+            high.set(i, new Register());
+            low.set(i, new Register());
+        }
+    }
+
+    public int[] scan() {
+        // acquire the lock
+        this.lock.lock();
+
+        int len = high.length();
+        int[] view = new int[len];
+        curSeq.set(curSeq.get() + 1);
+        for (int j = 0; j < len; j++) {
+            Register highReg = high.get(j);
+            if (highReg.seq < curSeq.get()) {
+                view[j] = highReg.val;
+            } else {
+                view[j] = low.get(j).val;
+            }
+        }
+
+        // release the lock before returning
+        this.lock.unlock();
+        return view;
+    }
+
+    public void update(int processNum, int val) {
+        int seq = curSeq.get();
+        Register highReg = high.get(processNum);
+        if (seq != highReg.seq) {
+            low.set(processNum, highReg);
+        }
+        high.set(processNum, new Register(val, seq));
+    }
+}
+
+```
+
+== (d)
+
+The two implementations I chose to compare were:
+
++ A simple `AtomicInteger` counter which would be incremented by all threads simultaneously. 
++ The snapshot implementation from *(b)*, where no locks are needed.
+
+I expected the simple `AtomicInteger` to be much faster, as the implementation is extremely simple, and doesn't use any kind of control mechanism. I thought this would lead to a low overall level of overhead, and perform significantly better than any other approach.
+
+The results are graphed below:
+
+#twocol(bimg("img/graph1.png"), bimg("img/graph2.png"))
+
+Results were taken on $n = {1, 5, 10, 20, 40}$, using 10 trials and `500000` increments.
+
+Somewhat surprisingly, over time, the increments per second actually got better for the snapshot. I believe this is because the read operations happen sparingly, and paying the price of Atomicity on the primary data structure *all the time* is rather taxing compared to a completely independent updating system as is the case for the snapshot. Unsurprisingly however, the reads always remained better for the `AtomicInteger` implementation.
+
+Attached below are the two `Counter.java` files, followed by `CounterTest.java` and `Register.java`. The only notable changes in the other files are in the tester, where I added some convenient print statements to check my correctness.
+
+*`Counter.java`* (_AtomicInteger_)
+```java
+import java.util.concurrent.atomic.*;
+
+public class Counter implements Reader {
+    private AtomicInteger counter;
+
+    public Counter(int numServers) {
+        this.counter = new AtomicInteger(0);
+    }
+
+    public int read() {
+        return this.counter.get();
+    }
+
+    public void update() {
+        this.counter.incrementAndGet();
+    }
+}
+
+class CountingServer implements Server {
+    private Counter counter;
+
+    public CountingServer(Counter counter, int processNum) {
+        this.counter = counter;
+    }
+
+    public void inc() {
+        this.counter.update();
+    }
+}
+
+```
+
+*`Counter.java`* (_Snapshot_)
+```java
+import java.util.concurrent.atomic.*;
+
+public class Counter implements Reader {
+    protected final AtomicInteger curSeq;
+    protected final AtomicReferenceArray<Register> high;
+    protected final AtomicReferenceArray<Register> low;
+
+    public Counter(int numServers) {
+        curSeq = new AtomicInteger(0);
+        high = new AtomicReferenceArray<Register>(numServers);
+        low = new AtomicReferenceArray<Register>(numServers);
+        for (int i = 0; i < numServers; i++) {
+            high.set(i, new Register());
+            low.set(i, new Register());
+        }
+    }
+
+    public int read() {
+        int len = high.length();
+        // view is now a cumulative sum instead of being an array
+        int viewCum = 0;
+        curSeq.set(curSeq.get() + 1);
+        for (int j = 0; j < len; j++) {
+            Register highReg = high.get(j);
+            if (highReg.seq < curSeq.get()) {
+                viewCum += highReg.val;
+            } else {
+                viewCum += low.get(j).val;
+            }
+        }
+/**
+ * An immutable pair of integers: a value and a sequence number (aka timestamp).
+ */
+public class Register {
+    /**
+     * The value of the register.
+     */
+    public final int val;
+    /**
+     * The sequence number (aka timestamp) of the register.
+     */
+    public final int seq;
+    
+    /**
+     * Constructs a Register with zeros.
+     */
+    public Register() {
+        val = 0;
+        seq = 0;
+    }
+    /**
+     * Constructs a Register with the given value and sequence number.
+     */
+    public Register(int v, int s) {
+        val = v;
+        seq = s;
+    }
+}
+
+        return viewCum;
+    }
+
+    public void inc(int processNum) {
+        int seq = curSeq.get();
+        Register highReg = high.get(processNum);
+        if (seq != highReg.seq) {
+            low.set(processNum, highReg);
+        }
+        high.set(processNum, new Register(highReg.val + 1, seq));
+    }
+}
+
+class CountingServer implements Server {
+    private Counter counter;
+    private int processNum;
+
+    public CountingServer(Counter counter, int processNum) {
+        this.counter = counter;
+        this.processNum = processNum;
+    }
+
+    public void inc() {
+        this.counter.inc(processNum);
+    }
+}
+```
+
+*`CounterTest.java`*
+```java
+import java.util.concurrent.atomic.*;
+import java.util.concurrent.locks.*;
+
+interface Snapshot {
+    /**
+     * Gets an atomic snapshot of the values in Snapshot.
+     * 
+     * This method is called by "scanner" threads. This method
+     * returns the values in each slot of the Snapshot object.
+     * 
+     * @return
+     *         The value of the Snapshot.
+     */
+    public int[] scan();
+
+    /**
+     * Updates the value of the Snapshot in the slot for a given thread.
+     * 
+     * This method is called by "updater" threads. This method sets the slot
+     * in the snapshot at location index to have value val.
+     * 
+     * @param index
+     *              The index in the array to update.
+     * @param val
+     *              The value to be written.
+     */
+    public void update(int index, int val);
+}
+
+interface Reader {
+    public int read();
+}
+
+interface Server {
+    public void inc();
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+class ServerRunner implements Runnable {
+    public final AtomicBoolean done;
+    private final Server server;
+    private final int processNum;
+    private final int numIncs;
+
+    public ServerRunner(Counter counter, int processNum, int numIncs) {
+        done = new AtomicBoolean(false);
+        this.server = new CountingServer(counter, processNum);
+        this.processNum = processNum;
+        this.numIncs = numIncs;
+    }
+
+    public void run() {
+        for (int i = 0; i < numIncs; i++) {
+            server.inc();
+        }
+        done.set(true);
+    }
+}
+
+class ReaderRunner implements Runnable {
+    public final AtomicBoolean done;
+    private final Reader reader;
+    public int scanCount;
+    public int[] recentSnapshots;
+
+    public ReaderRunner(Reader reader) {
+        this.done = new AtomicBoolean(false);
+        this.reader = reader;
+        this.scanCount = 0;
+        this.recentSnapshots = new int[10];
+    }
+
+    public void run() {
+        while (!done.get()) {
+            final int curVal = reader.read();
+            scanCount++;
+            recentSnapshots[scanCount % recentSnapshots.length] = curVal;
+        }
+    }
+}
+
+class StopWatch {
+    private long startTime;
+
+    public StopWatch() {
+        startTime = System.nanoTime();
+    }
+
+    public void reset() {
+        startTime = System.nanoTime();
+    }
+
+    public double peek() {
+        return (System.nanoTime() - startTime) / 1000000.0; // milliseconds
+    }
+}
+
+public class CounterTest {
+    public static void main(String[] args) {
+        if (args.length != 3) {
+            System.out.println("ERROR! Usage: java CounterTest [numTrials] [numIncs] [serverCount]");
+            return;
+        }
+
+        final int numTrials = Integer.parseInt(args[0]);
+        final int numIncs = Integer.parseInt(args[1]);
+        final int serverCount = Integer.parseInt(args[2]);
+
+        StopWatch sw = new StopWatch();
+
+        final int readerCount = 1;
+        final int numThreads = serverCount + readerCount;
+
+        double incPerMS[] = new double[numTrials];
+        double readsPerMS[] = new double[numTrials];
+
+        ServerRunner[] server = new ServerRunner[serverCount];
+        ReaderRunner reader;
+        Thread[] workerThread = new Thread[numThreads];
+
+        for (int t = 0; t < numTrials; t++) {
+            Counter counter = new Counter(numThreads);
+
+            reader = new ReaderRunner(counter);
+            workerThread[serverCount] = new Thread(reader);
+
+            for (int i = 0; i < serverCount; i++) {
+                server[i] = new ServerRunner(counter, i, numIncs);
+                workerThread[i] = new Thread(server[i]);
+            }
+
+            sw.reset();
+
+            for (int i = 0; i < numThreads; i++) {
+                workerThread[i].start();
+            }
+
+            // wait until each server is done
+            boolean allDone = false;
+            while (!allDone) {
+                allDone = true;
+                for (int i = 0; i < serverCount; i++) {
+                    if (server[i].done.get() == false) {
+                        allDone = false;
+                    }
+                }
+            }
+
+            // notify all of the readers to stop
+            reader.done.set(true);
+
+            // join every thread
+            for (int i = 0; i < numThreads; i++) {
+                try {
+                    workerThread[i].join();
+                } catch (InterruptedException ignore) {
+                    ;
+                }
+            }
+            double ms = sw.peek();
+
+            incPerMS[t] = numIncs * serverCount * 1.0 / ms;
+
+            readsPerMS[t] = 0.0;
+            readsPerMS[t] += reader.scanCount;
+            readsPerMS[t] /= ms;
+
+            if (counter.read() != numIncs * serverCount) {
+                System.out.printf("%s != %s\n", counter.read(), numIncs * serverCount);
+            } else {
+                System.out.println("Test Passed");
+            }
+        }
+
+        System.out.print(serverCount + " servers, " + readerCount + " readers :\n\tIncs/ms = [");
+        double incAvg = 0;
+        for (int t = 0; t < numTrials; t++) {
+            incAvg += incPerMS[t];
+            System.out.print(" " + String.format("%.2f", incPerMS[t]));
+        }
+        System.out.print(" ]\n\tReads/ms = [");
+        double readsAvg = 0;
+        for (int t = 0; t < numTrials; t++) {
+            readsAvg += readsPerMS[t];
+            System.out.print(" " + String.format("%.2f", readsPerMS[t]));
+        }
+        System.out.println(" ]");
+        System.out.printf("\nincAvg = %s\nreadsAvg = %s", incAvg / numTrials, readsAvg / numTrials);
+    }
+
+}
+
+```
+
+*`Register.java`*
+```java
+/**
+ * An immutable pair of integers: a value and a sequence number (aka timestamp).
+ */
+public class Register {
+    /**
+     * The value of the register.
+     */
+    public final int val;
+    /**
+     * The sequence number (aka timestamp) of the register.
+     */
+    public final int seq;
+    
+    /**
+     * Constructs a Register with zeros.
+     */
+    public Register() {
+        val = 0;
+        seq = 0;
+    }
+    /**
+     * Constructs a Register with the given value and sequence number.
+     */
+    public Register(int v, int s) {
+        val = v;
+        seq = s;
+    }
+}
+```
