@@ -87,7 +87,7 @@ Where $D$ is the diagonal matrix whose $i$th entry is $max{d_i^("out"), 1}$
 
 The Leontief inverse is part of both of the above equations, and represents:
 
-$ Lambda = (1 - alpha A)^(-1) $
+$ Lambda = (I - alpha A)^(-1) $
 
 We can $Lambda_(i j)$ as the sum over all length $l$ paths from $i$ to $j$, with the value of the walk being discounted by a factor of $alpha^l$. Therefore, the longer the path is, the less it counts towards the overall evaluation. We can express this intuition in a more formal sense by writing:
 
