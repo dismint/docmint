@@ -1,0 +1,3350 @@
+OS and VM isolation
+===================
+
+Paper: comparing different isolation techniques.
+  OS processes; Linux containers; gVisor; Firecracker.
+  Common concerns: strong isolation, high performance, compatibility.
+  Motivation: serverless compute platforms (AWS Lambda, Azure functions, etc).
+    Customer provides code to run, but doesn't manage specific VMs / machines.
+    Cloud provider spins up additional machines to handle load as needed.
+    Security challenge: arbitrary code, need to isolate it from other customers.
+    Performance challenge: load might vary widely.
+      Can vary from a small fraction of machine to many machines.
+      Can vary quickly, so need to start new instances quickly.
+    Many of the specific isolation techniques are used more broadly too.
+      Android phones, web servers, Chrome web browser, OpenSSH, ...
+  Motivation: convergence of isolation technologies on container abstraction.
+    Same logical abstraction (running processes with a given Linux file system image).
+    Many ways to run this abstraction.
+    Are there important differences?
+  Motivation for this class: understand the different options for isolation.
+    Also, lab 2 will use containers.
+
+Isolation approaches
+  Linux processes
+  Containers, using Linux namespaces + cgroups
+  "User-space kernel" or "library OS" (gVisor, Drawbridge)
+  VMs
+  Language runtimes (next lecture)
+
+Linux processes.
+  User IDs.
+  Per-file permissions.
+  Intended for fine-grained sharing between users, rather than coarse isolation.
+
+Linux containers terminology refers to two different roles.
+  Abstraction: packaging software along with all dependencies.
+    Libraries, packages, files, etc.
+    Useful even without isolation: what if two apps need different libssl versions?
+  Isolation: ensuring that the code runs securely on same machine as other apps.
+  Container abstraction could be used with other isolation plans.
+    Open Container Initiative (OCI) has a standard container format.
+    Docker container can run with Linux container isolation or gVisor.
+      Even support for running Docker containers on Firecracker.
+      [[ Ref: https://github.com/weaveworks/ignite ]]
+  Container isolation built on two Linux mechanisms: namespaces and cgroups.
+    Namespaces enable control over what files, processes, etc, are visible.
+    Cgroups control resource use for performance isolation.
+
+Why is isolation challenging in Linux?
+  Lots of shared state ("resources") in the kernel.
+  System calls access shared state by naming it.
+    PIDs.
+    File names.
+    IP addresses / ports.
+    (Even user IDs, in some form.)
+  Typical access control revolves around user IDs (e.g., file permissions).
+    Hard to use that to enforce isolation between two applications.
+    Lots of files with permissions.
+    Applications create shared files by accident or on purpose (e.g., world-writable).
+
+Linux mechanism: chroot.
+  Benefit: limits the files that one application can name.
+    Doesn't matter if application accidentally creates world-writable files.
+  Some technical limitations, but a good starting point for better isolation.
+
+Namespaces provide a way of scoping the resources that can be named.
+  [[ Ref: https://blog.quarkslab.com/digging-into-linux-namespaces-part-1.html ]]
+  Process belongs to a particular namespace (for each namespace kind).
+    New processes inherit namespace of the parent process.
+  E.g., PID namespace limits the PIDs that a process can name.
+  Coarse-grained isolation, not subject to what application might do.
+  A better-designed chroot for different kinds of resources (not just file system).
+
+Linux cgroups.
+  Limit / scheduling for resource use.
+  Memory, CPU, disk I/O, network I/O, etc.
+  Applies to processes, much like namespaces.
+    New processes inherit cgroup of the parent process.
+  Not a security boundary, but important for preventing DoS attacks.
+    E.g., one process or VM tries to monopolize all CPU or memory.
+
+Containers using namespaces + cgroups.
+  Unpack container's intended files somewhere in the file system.
+  Allocate new namespace to run container.
+  Point the root directory of the container namespace at container's file tree.
+  Set up cgroup for container based on any scheduling policy.
+  Set up a virtual network interface for container.
+  Run processes in this container.
+    Appears to run in a separate Linux system.
+    Its own file system, its own network interface, its own processes (PIDs), etc.
+
+Why might namespaces not be enough?
+  Shared Linux kernel.
+  Wide attack surface: 350+ system calls, many specialized functions under ioctl...
+  Large amount of code, written in C.
+    Bugs (buffer overflows, use-after-free, ...) continue to be discovered.
+    No isolation within the Linux kernel itself.
+  Kernel bugs let adversary escape isolation ("local privilege escalation" or LPE).
+    Relatively common: new LPE bugs every year.
+
+Additional security mechanism: seccomp-bpf.
+  Idea: filter what system calls can be invoked by a process.
+  Might help us address the wide attack surface of the Linux kernel.
+  Common pattern: rarely-used syscalls or features are more likely to be buggy.
+  Every process is (optionally) associated with a system call filter.
+    Filter written as a little program in the BPF bytecode language.
+    Linux kernel runs this filter on each syscall invocation, before running syscall.
+    Filter program can decide if syscall should be allowed or not.
+    Can look at syscall#, arguments, etc.
+    New processes inherit syscall filter of parent process: "sticky".
+  Can use seccomp-bpf to prevent access to suspect syscalls.
+  Used by some container implementations.
+    Set up bpf filter to disallow suspect system calls.
+  Why might this not be good enough?
+    Restricting syscalls could limit compatibility.
+    Could break application code that uses uncommon syscalls.
+    But still might not be enough for security (lots of code/bugs in common syscalls).
+
+Additional security mechanisms: mandatory access control.
+  E.g., Linux has LSM (https://en.wikipedia.org/wiki/Linux_Security_Modules)
+    Many variants: AppArmor, SELinux, etc.
+  Administrator specifies policy on what operations are allowed.
+    Typically based on what user is running process, or what binary is executing.
+    Can specify broad rules (e.g., no write access to any files).
+
+More heavy-weight approach: VMs (QEMU).
+  Run Linux in a guest VM.
+    Much like the VM used to run lab code for 6.858.
+  Why is this better than Linux?
+    Smaller attack surface: no complex syscalls, just x86 + virtual devices.
+    Fewer bugs / vulnerabilities: VM escape bugs discovered less than once a year.
+  What's the downside?
+    High start-up cost: takes a long time to boot up VM.
+    High overhead: large memory cost for every running VM.
+    Rigid/coarse resource allocation and sharing (VM memory; virtual disk; vCPU).
+    Potential bugs in VMM itself (qemu): 1.4M lines of C code.
+
+What's involved in a implementing support for VMs?
+  Virtualizing the CPU and memory.
+    Hardware support in modern processors.
+    Nested page tables.
+    Virtualizing privileged registers that are normally only accessible to kernel.
+  Virtualizing devices.
+    Disk controller.
+    Network card.
+    PCI.
+    Graphics card.
+    Keyboard, serial ports, ...
+  Virtualizing the boot process.
+    BIOS, boot loader.
+
+Linux KVM.
+  [[ Ref: https://www.kernel.org/doc/html/latest/virt/kvm/api.html ]]
+  Abstraction for using hardware support for virtualization.
+  Manages virtual CPUs, virtual memory.
+  Corresponding hardware support: nested page tables.
+
+QEMU.
+  Implements virtual devices, similar to what real hardware would have.
+  Also implements purely-virtual devices (virtio).
+    Well-defined interface through shared memory regions.
+  Also implements emulation of CPU instructions.
+    Mostly not needed when using hardware support.
+    But still used for instructions that hardware doesn't support natively.
+    E.g., CPUID, INVD, ..
+    [[ Ref: https://revers.engineering/day-5-vmexits-interrupts-cpuid-emulation/ ]]
+  Also provides some BIOS implementation to start running the VM.
+
+Firecracker design.
+  Figure 3 in the paper.
+  Use KVM for virtual CPU and memory.
+  Re-implement QEMU, in Rust.
+  Support minimal set of devices.
+    virtio network, virtio block (disk), keyboard, serial.
+  Block devices instead of file system: stronger isolation boundary.
+    File system has complex state.
+      Directories, files of variable length, symlinks / hardlinks.
+    File system has complex operations.
+      Create/delete/rename files, move whole directories, r/w range, append, ...
+    Block device is far simpler:
+      4 KByte blocks.
+      Blocks are numbered 0 through N, which is the size of the disk.
+      Read and write a whole block.  (And maybe flush / barrier.)
+  Do not support instruction emulation.
+    (Except for necessary instructions like CPUID, VMCALL/VMEXIT, ..)
+  Do not support any BIOS at all.
+    Just load the kernel into VM at initialization and start running it.
+
+Firecracker implementation: Rust.
+  Memory-safe language (modulo "unsafe" code).
+  50K lines of code: much smaller than QEMU.
+  Makes it unlikely that VMM implementation has bugs like buffer overflows.
+  [[ Ref: https://github.com/firecracker-microvm/firecracker ]]
+
+Firecracker VMM runs in a "jailed" process.
+  chroot to limit files that can be accessed by VMM.
+  namespaces to limit VMM from accessing other processes and network.
+  running as a separate user ID.
+  seccomp-bpf to limit what system calls the VMM can invoke.
+  All to ensure that, if bugs in VMM are exploited, hard to escalate attack.
+
+Firecracker security seems pretty good.
+  Rust implementation: less bug-prone.
+  Much less code in the VMM.
+  Jailed VMM process.
+  Linux KVM still part of TCB, but much smaller than QEMU.
+  Still, KVM bugs would undermine Firecracker's isolation.
+    [[ Ref: https://googleprojectzero.blogspot.com/2021/06/an-epyc-escape-case-study-of-kvm.html ]]
+  Some bugs found in Firecracker:
+    [[ Ref: https://github.com/firecracker-microvm/firecracker/issues/1462 ]]
+      Memory bounds-checking issue, despite being written in Rust.
+    [[ Ref: https://github.com/firecracker-microvm/firecracker/issues/2057 ]]
+      DoS bug in network interface.
+    [[ Ref: https://github.com/firecracker-microvm/firecracker/issues/2177 ]]
+      Serial console buffer grew without bound.
+      Could cause one VM to use lots of memory through the Firecracker process.
+
+gVisor plan: re-implement the OS syscall interface in a separate user-space process.
+  Figure 2 in the paper.
+  Intercept syscalls from processes running in the container (using ptrace or KVM).
+  User-space process that implements those syscalls, written in Go.
+    Again, better language than C for avoiding buffer overflows, other mistakes.
+  Benefit: less likely to have memory management bugs in Go code.
+  Benefit: bugs aren't in kernel code, likely contained by Linux process.
+    Use seccomp-bpf to limit what syscalls the gVisor emulator can invoke.
+  Benefit: finer-grained sharing.
+    Could share specific files or directories.
+  Benefit: finer-grained resource allocation.
+    Not just a monolithic virtual disk or entire VM memory allocation.
+    Perhaps important for running a small application in isolation.
+  Downside: performance overheads could be significant.
+    Every system call must be redirected to gVisor process.
+    Context-switch overhead, data copying overhead, etc.
+  Possible downside (or upside): compatibility (real Linux vs gVisor).
+    gVisor does a credible job faithfully implementing Linux syscalls, though!
+    Could make it possible to emulate new syscalls on old host.
+
+Common pattern: supervisor/monitor process (gVisor's Sentry, Firecracker's VMM).
+  Handles requests from isolated code, instead of exposing the host OS.
+  Supervisor process is itself sandboxed, isolated.
+  seccomp, cgroups used to limit damage from Sentry and Firecracker VMM.
+  Privilege separation within gVisor: Gofer is separate from Sentry.
+    Gofer has extra privileges (file access).
+    Don't want arbitrary file access by compromised Sentry.
+
+Security comparison: syscalls accessible.
+  Total of ~350 syscalls.
+  LXC (Docker): blocks 44 syscalls (so 300+ allowed).
+  Firecracker: 36 syscalls allowed for VMM.
+  gVisor: 53-68 syscalls allowed for Sentry.
+
+Code coverage comparison.
+  Native processes execute the least code.
+  Significant overlap between all 3 isolation platforms
+  Firecracker, gVisor use hardware virtualization support.
+    LXC (and native) doesn't use it.
+  Why are all isolation frameworks hitting the same code?
+    One possible answer: ultimately need to implement desired function.
+      Context-switching, storage, networking, ..
+    Indirection layers might be important for isolation.
+    Still need the host to access storage, network, etc.
+  Some evidence for hitting the same code: Figures 9-12 (network flame graphs).
+    All 4 isolation platforms need to send packets.
+    Copying data is the biggest cost.
+    Memory allocation.
+    Firecracker and gVisor don't use host TCP stack.
+
+CPU performance?
+  All platforms have pretty reasonable performance.
+
+Network performance?
+  User-space network stack in gVisor is not nearly as optimized.
+  Firecracker ends up running Linux network stack inside the VM, great throughput.
+  High latency for Firecracker, due to packets going through two network stacks.
+
+Memory management?
+  Coarse-grained memory allocation in Firecracker: less dynamic allocation costs.
+  Similar code running for native, LXC, and gVisor.
+
+Storage?
+  Firecracker has coarse-grained virtual disk file, less per-file operations.
+  Native, LXC, and gVisor all end up mapping guest files 1-to-1 to host files.
+  Firecracker is really fast but mostly because it's not making writes durable.
+  Forcing Firecracker to flush brings its storage perf in line with other systems.
+
+What are some potential benefits or downsides of each of the platforms?
+  Native: simple, least code being executed, least overhead.
+  LXC: isolation and container abstraction, flexible sharing, near-native perf.
+  gVisor: strong isolation but still flexible sharing, resource allocation.
+  Firecracker: strong isolation, better perf than gVisor, but coarse-grained.
+
+Summary.
+  Isolation is a key building block for security (yet again).
+  Challenging to achieve isolation along with other goals:
+    High performance.
+    Low overheads (memory, context switching, etc).
+    Compatibility with existing systems (e.g., Linux).
+  Comparison of different OS/VM-based isolation mechanisms.
+
+Software fault isolation: WebAssembly
+=====================================
+
+This lecture's readings: wasm + exploration of building a secure wasm runtime.
+  Formally reasoning about correctness for vWasm helps clarify isolation plan.
+  Neat trick with rWasm translating wasm code to Rust, which enforces isolation.
+
+Goal: run fast code in web applications.
+  Javascript is universally supported but not a great fit in some cases.
+    High-performance code.
+    Applications written in a language that's not JS.
+  Challenge: code must be isolated.
+    Cannot have code from one website tamper with data from another site.
+    Cannot have code from a website tamper with data on user's computer.
+
+We've seen a number of isolation mechanisms already.  Why yet another one?
+  Some require special privileges.
+    Need to be root in order to set up chroot, UIDs, etc.
+  Some work only on specific platforms.
+    Firecracker runs only on Linux.
+      But then what about browsers on Windows, MacOS, ...?
+    VMs work well on CPUs that support hardware virtualization.
+      But then what about devices without direct hardware VM support?
+  Some require the system to be pre-configured by administrator.
+    Containers require Docker / LXC / etc to be installed first.
+    Administrator must create virtual network interfaces.
+    Administrator must set up UID namespaces.
+
+Approach: software fault isolation.
+  Powerful idea for achieving isolation.
+  Does not rely on hardware or OS support.
+    Does not require special privileges to deploy.
+    Can provide isolation even in the face of some hw/os bugs.
+  But requires cooperation between developers and devices that run their code.
+    Cannot take existing binary and run it in isolation.
+    Contrast with containers or VMs: can run existing Linux applications.
+
+Modern SFI system: WebAssembly.
+  [[ Demo: wasm/README ]]
+  lib.c has some code
+  Can run it on command-line:
+    wasmtime main.wasm "test Hello world"
+  Can also run it in the browser:
+    python -m http.server 8080
+    load http://localhost:8080/demo.html
+  Corrupting memory in lib.c gets caught.
+    uncomment memset
+    recompile (make)
+    wasmtime main.wasm test, catches error
+    shift-reload browser, catches error as well
+
+WebAssembly module.
+  Functions.  Define all of the code in the module.
+  Globals.  Global variables.
+  Tables.  Targets of function pointers.
+  Memory.  Contiguous memory from 0 to sz.
+  Imports and exports.  E.g., can mark a function as exported, or import function.
+  Demo:
+    wasm2wat lib.wasm
+
+WebAssembly workflow.
+  [[ Application code (e.g., C) ]]
+    -> C compiler that can generate WebAssembly ->
+  [[ WebAssembly module / file ]]
+    -> Runtime (vWasm, rWasm, ...) ->
+  [[ Native code that can execute the WebAssembly module ]]
+
+What are the security guarantees for running Wasm code?
+  Threat model: Section 3.
+  Adversary can run any of the functions in the Wasm module.
+  Should not be able to access memory outside of what's assigned to the sandbox.
+
+Challenge: performance + isolation.
+  Could write an interpreter for whatever code we want to run.
+    Javascript sort-of works this way.
+    Could even be x86: just run qemu in the browser to emulate x86.
+  Interpreter will not allow code to access outside of isolation boundary.
+  But that's slow; goal is high performance.
+
+Why would it be difficult to just isolate arbitrary x86 running natively?
+  Ultimately want to prevent:
+    Syscalls.
+    Accessing memory outside of the isolated module.
+  But hard to control what the code does through validation.
+    Hard to determine what memory addresses will be accessed.
+    Hard to tell if code will jump somewhere else, outside of module.
+    Perhaps hard to tell if there's syscall instructions even.
+      Variable-length instructions in x86.
+  At runtime, code uses computed jumps and computed memory accesses.
+    Without hardware support, cannot control what the addresses will be.
+
+Overall approach: make sure all memory accesses are checked.
+  Naive variant of this plan: add a bounds check just before every memory access.
+  Performance challenge: that might be a lot of bounds checks!
+  Security challenge: what if the code bypasses the check, jumping past it?
+
+Why is WebAssembly better than x86?
+  Clever design enables simple (and thus secure) high-performance interpreter/compiler.
+  Split off structured data (code, stack, variables) from unstructured data (memory).
+    Code not accessible as data at all.
+    Can avoid bounds-checking for accesses to stack, variable locations.
+    Only need bounds-checking for pointer accesses to memory.
+    Wasm stack is not quite the same as the C stack: cannot access by pointer.
+    If any data structures are accessed by pointer, compiler must put them in memory.
+  Structured control flow so there's no possibility to jump past the check.
+    No way to refer to the address of an arbitrary instruction.
+    Structured control flow (scoped blocks); jumps only via pre-defined tables.
+    Again, compiler's job is to ensure any pointer jump targets are registered.
+  Possible to do SFI for x86, x86-64, ARM, etc.
+    [[ Ref: https://css.csail.mit.edu/6.858/2020/readings/nacl.pdf ]]
+    Quite a bit more complex than WebAssembly, perhaps slower, not portable.
+
+High performance plan: translate WebAssembly into native code (e.g., x86, x86-64).
+  Basic operations like arithmetic should be more-or-less one-to-one.
+  That is, one WebAssembly operation can compile into one x86-64 instruction.
+    One of the reasons why NaN floating-point ops are non-deterministic.
+    Different hardware has different bit-level behavior when NaNs are involved.
+    Want to emit single floating-point hardware instruction, so allow non-determinism.
+  But need to be more careful about state and control flow.
+    State: shouldn't be able to access anything outside the module.
+    Control flow: shouldn't jump to any code that's not "properly translated."
+
+What's the plan for ensuring safety of the executed code?  (vWasm style)
+  WebAssembly instructions that access state should not escape the sandbox.
+    Need to make sure we're accessing legal local var / global var / heap memory.
+    Add checks to the generated native code as needed to make this safe.
+  Ensure that the generated code can only jump to other generated code.
+    Cannot jump to code outside of sandbox.
+    Cannot jump to mis-aligned code.
+    Cannot jump to code in sandbox bypassing the check.
+    Typically this is called "control flow integrity" or CFI.
+  This plan is summarized in the vWasm proof strategy (end of Section 4.3).
+
+What state can the WebAssembly code access?
+  Stack values.
+  Local variables.
+  Global variables.
+  Heap memory, grows from 0 upwards.
+
+How to bounds-check global var accesses?
+  Known ahead of time how many global vars are in a module.
+  Can check global var access at compile-time.
+  Emit code that is always safe to run.
+    Just access globals[off] where off is already a checked constant.
+    Runtime maintains some way to access the base of the globals.
+  Accessing in-bounds globals is safe.
+    WebAssembly code could write arbitrary values to global variable.
+    But that's OK: isolation doesn't depend on specific values.
+
+How to bounds-check local var accesses?
+  Every function has a well-known (constant) number of local variables.
+    Local variables include arguments to a function call.
+    As with globals, can check the offset is in-range at compile time.
+  Slight complication: how do we access the local variables?
+    Same function could be invoked many times recursively.
+    Want to access the local variables for current invocation.
+  At runtime, these local variables are stored on the (native) stack.
+    Intermingled with (WebAssembly) stack values.
+    See next.
+
+How to bounds-check stack locations?
+  Big question:
+    Is this stack offset valid to access?
+  How are WebAssembly local variables + stack implemented in terms of a native stack?
+    (Some WebAssembly stack values are never materialized: stored in registers.)
+    Real stack stores WebAssembly local vars, stack values (that aren't omitted),
+      plus return addresses, saved registers when calling.
+    Need to make sure return addr doesn't get corrupted by storing to local var.
+
+WebAssembly's structured control flow helps check stack accesses.
+  At every point in a function, it's known how many values are on the runtime stack.
+  Control flow within a function must always agree on stack contents.
+    E.g., converging control flow must agree on how many stack items there are.
+  Benefit: compile-time check for how far up the stack code can access.
+    Compiler knows the stack depth at every instruction in WebAssembly code.
+  Benefit: compiler knows where the local variables are located.
+    Accessing local variable requires skipping WebAssembly stack values on stack.
+    But since we know stack depth, compiler can easily add that offset.
+  Benefit: runtime can check if we're out of stack space.
+    When entering a function, runtime knows how much stack space will be needed.
+
+Bounds-checking memory operations.
+  E.g., i64.store stores 64-bit value (8 bytes) at some address A.
+  Need to make sure the resulting code cannot corrupt state outside of sandbox.
+    In particular, addresses A through A+7 must be within the memory region.
+  What should the compiled code look like?
+    if a+8 >= memsz { panic }
+    do the store
+  Compiler can potentially eliminate repeated bounds checks.
+    uint64 a[4];
+    a[0] = ..;
+    a[1] = ..;
+    a[2] = ..;
+    a[3] = ..;
+  Suffices to check once:
+    if a+4*8 >= memsz { panic }
+    do the 4 stores
+
+Clever use of virtual memory for bounds checks is possible.
+  WebAssembly specification says memory is at most 4GB in size.
+  Address used for i64.store is a 32-bit unsigned address.
+  Instruction can also specify a static offset.
+    Common to access arrays, which means two offsets.
+      a[5] = 6;
+  So, full memory store operation is:
+    *(membase + address + offset) = value
+  WebAssembly specification requires both address and offset to be 32-bit values.
+    Thus, resulting address will be at most 8GB from membase.
+  Trick: virtual memory reserves 8GB region of memory for all possible addresses.
+    Worst case, will hit page fault if access is to memory beyond allocated size.
+
+Small trade-off with VM-based bounds checking.
+  Not quite deterministic anymore.
+  Depending on runtime, program might or might not stop on out-of-bounds store,
+    if store is slightly out-of-bounds.
+
+Yet another trade-off suggested by the paper: possible corruption on OOB write.
+  Mask the address (cut off the high bits).
+  Out-of-bounds write gets the address truncated, overwrites some in-bounds memory.
+  Safe; turns unsafe access into a correctness problem.
+
+No memory safety within a module.
+  Entirely possible for a C program compiled to WebAssembly to have buffer overflow.
+  E.g., corrupt heap-allocated memory region.
+  WebAssembly doesn't prevent overflow, so C program could misbehave arbitrarily.
+  But does ensure that the WebAssembly code can't affect the rest of the system.
+
+Why is value type checking important?  (i32 vs i64)
+  Compiler may want to know if a value might be limited to 32 bits.
+  Allows some optimizations like loading/storing memory locations.
+
+Why is function type checking important?  (How many arguments does a function take?)
+  WebAssembly function can access (and modify) arguments.
+    They are just like local vars.
+  Thus, wasm function can modify some number of runtime stack locations,
+    depending on how many arguments it declares itself as taking.
+  Need to make sure the caller gave us enough arguments on the stack.
+    Otherwise function can read/write other items on runtime stack!
+    Could be some native return address, which would be bad.
+
+How to achieve control flow integrity?
+  Direct jumps: compiler ensures the native jump goes to proper compiled code.
+  Function calls: set up the stack in the way the target function expects.
+    Namely, args + return address should be at the bottom of the stack after call.
+    Type safety for function types ensures we put the right number of arguments.
+  Indirect function calls: table of jump targets.
+    Compiler ensures that all jump targets are valid functions.
+    WebAssembly call_indirect emits native code to jump to some function from table.
+
+rWasm runtime: compile wasm module to Rust code.
+  Demo:
+    git clone https://github.com/secure-foundations/rWasm
+    cd rWasm
+    cargo run ~/demo/lib.wasm-strip
+    wasm2wat ~/demo/lib.wasm
+    cat generated/src/lib.rs
+    [[ look at the implementation for add: func_0 ]]
+    [[ look at the implementation for memwrite: func_2 ]]
+    [[ look at memory_accessors: Rust's slice &[u8] checks bounds in get/get_mut ]]
+
+    cargo run -- --wasi-executable ~/demo/main.wasm-strip
+    ( cd generated && cargo run "Hello world" )
+    ( cd generated && cargo run )
+
+    ## What happens if we re-introduce the memset in lib.c?
+    re-run make
+    cargo run -- --wasi-executable ~/demo/main.wasm-strip
+    ( cd generated && cargo run "Hello world" )
+
+  Cool trick of using Rust guarantees.
+    All generated code is "safe" Rust, meaning should be impossible to have OOB accesses.
+    Compiler should ensure the code is sandboxed properly.
+  Nice to be able to see how the wasm runtime is working, by examining generated Rust.
+  Compilation times are prohibitively slow compared to other runtimes.
+
+Is Rust special in some way?
+  Could have compiled to some other language too, if we can ensure memory isolation.
+  E.g., could compile to Javascript or Python too.  Slow but probably isolated.
+  E.g., could compile to Go too.  Could probably get reasonable performance.
+  Rust has a strong type system that catches many issues at compile-time.
+    Things like checking the type of stack vars would be done at runtime in JS/Python.
+    [[ Ref: https://github.com/secure-foundations/rWasm/blob/main/templates-for-generation/tagged_value_definitions.rs ]]
+  Rust has a convenient way of checking if a library is using unsafe code.
+    #![forbid(unsafe_code)]
+    Reduces the amount of code that has to be trusted (assumed correct).
+
+WebAssembly is widely supported in browsers now.
+  Firefox, Chrome, Safari, mobile variants, IE Edge, ...
+  Used in serious applications, like Adobe Photoshop, Figma, Google Earth.
+  [[ Ref: https://web.dev/ps-on-the-web/ ]]
+  [[ Ref: https://www.figma.com/blog/webassembly-cut-figmas-load-time-by-3x/ ]]
+  [[ Ref: https://web.dev/earth-webassembly/ ]]
+
+Quite a bit of activity, new features.
+  [[ Ref: https://github.com/WebAssembly/proposals ]]
+  E.g., work on adding support for threads, vector instructions, etc.
+
+Also used outside of web browsers.
+  E.g., Fastly and Cloudflare CDNs use WebAssembly.
+    Goal: run code on a server near requesting user.
+    Similar goals to AWS Lambda, perhaps even more focus on low-overhead starts.
+    Run the compilation step once, then binary is fast to start running.
+    [[ Ref: https://docs.fastly.com/products/compute-at-edge ]]
+    [[ Ref: https://blog.cloudflare.com/webassembly-on-cloudflare-workers/ ]]
+  Cloudflare also uses Javascript-level sandboxing.
+    [[ Ref: https://blog.cloudflare.com/cloud-computing-without-containers/ ]]
+  Ongoing work to define standard interface to the system outside of a module.
+    [[ Ref: https://github.com/WebAssembly/WASI ]]
+
+What do security vulnerabilities in WebAssembly sandboxes look like?
+  [[ Ref: https://www.fastly.com/blog/defense-in-depth-stopping-a-wasm-compiler-bug-before-it-became-a-problem ]]
+  Compiler relied on 32-bit type optimization for memory accesses.
+    Knows that certain values are 32 bits only.
+    If accessing memory with a known-32-bit offset, omit truncation.
+    Otherwise, emit instruction that will force-zero the upper 32 bits of 64-bit value.
+  Compiler stored values in CPU registers (rather than stack locations) for performance.
+  When it ran out of registers, stored these registers on runtime stack.
+  Bug: when reloading 32-bit value from stack, accidentally sign-extended it.
+    I.e., 0x80000000 was loaded as 0xffffffff80000000 instead of 0x0000000080000000.
+    Just a wrong instruction used to restore 32-bit value from stack to register.
+  Now it's not safe to add this (supposedly known-32-bit) value for memory access.
+    Ends up subtracting from memory base instead of adding to it.
+
+Possible to reduce TCB to rely on a verifier rather than entire compiler.
+  Add a verifier that accepts binary result of compiler and outputs yes/no.
+  Verifier can be much smaller than compiler.
+  E.g., VeriWasm for Lucet (now Wasmtime).
+    [[ Ref: https://cseweb.ucsd.edu/~dstefan/pubs/johnson:2021:veriwasm.pdf ]]
+    [[ Ref: https://github.com/bytecodealliance/wasmtime ]]
+
+Possible to reduce the cost of transitions between isolation domains even further.
+  [[ Ref: https://cseweb.ucsd.edu/~dstefan/pubs/kolosick:2022:isolation.pdf ]]
+
+Summary.
+  Language-level isolation / software fault isolation.
+  Powerful idea for building strong, OS/HW-independent sandboxes.
+  Can be even lower overhead than OS/HW isolation: lower context switching costs.
+  Correct compiler / runtime is critical to achieving security.
+  WebAssembly designed to make compiler/runtime job easier in terms of security.
+
+Trusted hardware
+================
+
+Isolation in a new threat model:
+  adversary has some physical control of the computer.
+
+Subsumes a range of potential attacks.
+  Adversary steals laptop, tries to extract data.
+  Decommissioned laptop disposed, adversary tries to get data from disk.
+  Adversary tampers with server in a data center.
+  Adversary modifies the disk to contain malicious software.
+  Adversary tries to extract secret data from a laptop or server.
+
+Two general settings where this threat might show up:
+  The owner of the device is trusted (Bitlocker story, mostly about theft).
+  The owner of the device is untrusted (DRM, cloud computing, smartcards).
+
+In general, security against a physical attacker tends to be a gray area.
+  Capable adversary can physically tamper with hardware, extract secrets, etc.
+  Possible to increase attack effort, but few ideas provide a big leap.
+  One of these ideas, though, is this paper's focus: using cryptography.
+
+General model for trusted hardware:
+  Trusted chip that we assume hasn't been tampered with.
+  Generally, trusted chip is assumed to be simple, to make it tamper-resistent.
+    Larger devices might be too costly to protect from physical tampering.
+  Everything external to the trusted chip could be controlled by adversary.
+    In particular, includes I/O, memory, and storage.
+  Powerful technique: use cryptography (encryption, authentication).
+
+Interesting paper: real-world engineering trade-offs for a security system.
+  Authors fully acknowledge their system is not perfect.
+  Nonetheless, design makes sense for target threat model.
+  Real system: used in Windows Vista onwards.
+  Clean story about using TPM as trusted hardware for physical attacks.
+    More sophisticated systems like SGX are a mix of physical + software threats.
+
+What's the problem this paper is trying to solve?
+  Prevent data from being stolen if an attacker physically steals a laptop.
+  How would an attacker get data from stolen laptop, without Bitlocker?
+    Easy: take out the disk; boot from CD and change passwords; etc.
+  Bitlocker's focus: disk encryption, with support from trusted hardware.
+
+Why does Bitlocker need trusted hardware at all?
+  Problem: where do the disk encryption (or, decryption) keys come from?
+  Simple approach: user provides key in some form.
+    User might enter password (hashed to produce key, like in Kerberos).
+      Problem: user needs to enter password early in the boot process (BIOS).
+      Problem: passwords are weak, adversary can try to guess the right one.
+    User might plug in a USB drive containing the key.
+      Problem: users don't want to carry around extra USB keys.
+      Problem: users might lose the USB key along with the laptop.
+  Bitlocker's plan: use trusted hardware to get the key.
+    Design trade-off between strong security guarantees and usability.
+
+Starting point: how to know your system is running the right software?
+  Often shows up in fixed-function devices: game consoles, Chromebooks, etc.
+
+Basic plan: secure boot.
+  Initial boot code comes from ROM, hard-wired at manufacture time.
+  ROM code loads boot loader, checks signature on boot loader.
+    ROM comes with public key that is used for verification.
+  Boot loader loads OS kernel, similarly checks signature.
+  OS kernel checks integrity of all other data it loads.
+  One technical complication: past OS kernel, too costly to check all data.
+    E.g., entire OS image including all libraries.
+    Don't want to load it from disk just to check signature.
+    Instead, need some more efficient plan to authenticate data.
+  One approach: signature on the Merkle root of a file system tree.
+    Check Merkle proofs when loading some data from disk later on.
+    Effectively deferring checks.
+  Another approach we'll look at later: Bitlocker's "poor man's authentication".
+    More efficient but weaker guarantee.
+  Many systems look like this secure boot story.
+    Apple iOS devices.
+    Game consoles (Playstation, Xbox, etc).
+    Chrome OS Verified Boot.
+      [[ Ref: https://www.chromium.org/chromium-os/chromiumos-design-docs/verified-boot ]]
+    UEFI Secure Boot.
+      [[ Ref: https://docs.microsoft.com/en-us/windows/security/information-protection/secure-the-windows-10-boot-process ]]
+
+Common challenge: rollback.
+  Boot ROM is stateless, has no idea what version it might have seen before.
+  Naive design could be tricked into booting old OS that has security bugs.
+  One fix: monotonic counter in hardware tracks last seen OS version.
+  More clever trade-offs possible: see Apple iOS case study in later lecture.
+
+More flexible alternative: "measured boot".
+  Secure boot supposes you know what key must sign the software.
+  What if the hardware doesn't know what software is good vs bad?
+  Idea: measure what software gets booted.
+    Hash the boot loader, then hash the OS kernel, then hash the OS image, etc.
+  Cannot prevent bad software from loading, but can generate different secrets!
+  System has some durably-stored secret in hardware (same across reboots).
+  When system boots up, it derives a secret key based on its hardware secret.
+    Derivation based on hash of boot loader, OS kernel, etc.
+  OS gets secret key to decrypt its data, to authenticate to remote servers, etc.
+  Booting different OS (e.g., due to malware corruption?) generates different key.
+
+Measured boot typically requires a separate trusted measurement chip/device.
+  With secure boot, we were sure all of the code running was "trusted".
+  With measured boot, we don't know what is trusted or not; just measuring it.
+  Main CPU could be running arbitrary code, so how do we do measurements?
+
+x86 measured boot approach: TPM (Trusted Platform Module).
+
+               DRAM       /-- BIOS
+                 |        |
+    CPU --- Northbridge --+-- TPM
+
+  TPM chip has an ephemeral set of registers (PCR0, PCR1, ..), and a key.
+  Some supported operations (others also exist, but irrelevant here):
+    TPM_extend(m): extend a PCR register, PCRn = SHA1(PCRn || m)
+    TPM_quote(n, m): generate signature of (n -> PCRn, m) with TPM's key
+    TPM_seal(n, PCR_value, plaintext): return ciphertext.
+    TPM_unseal(ciphertext): return plaintext, if PCRn matches PCR_value.
+
+Who does the authentication/measurement for measured boot?
+  PCR values get reset to zero only when the entire computer is reset.
+    Important: CPU and TPM must reset together.
+    Important: CPU must jump to BIOS code, which is not tampered with.
+  BIOS code "measures" itself: extends PCR with hash of its code.
+  BIOS code loads boot loader (e.g., Linux grub), measures it
+    (extends PCR with the hash of the boot loader), runs it.
+  Boot loader loads kernel, measures it (extends PCR with H(kernel)), runs it.
+
+What can we infer if some PCRn corresponds to a particular chain of hashes?
+  Could be that the right software chain was loaded.
+  Or some software along the way had a bug, was exploited, and adversary
+    issued their own extends from that point forward in the chain.
+  Or the CPU did not start with the BIOS code in the first place.
+  Or the TPM hardware did not reset synchronously with the CPU.
+    [ Turned out to be "easy" on some motherboards: just short out a pin. ]
+
+What does this allow us to do?
+  Under assumption that adversary does not tamper with CPU, TPM, or their link.
+
+Can prove to others over the network that you're running some software.
+  Use TPM_quote() to get the TPM to sign a message on your behalf.
+  Assumption: remote party trusts your TPM (but not you directly).
+  TPM has its own secret key, HW mfg signs public key, stores cert on TPM.
+  Typically called an "attestation".
+
+Good fit for untrusted-owner settings: DRM, cloud compute server, etc.
+  Can communicate with a remote device, and know it's running expected code.
+  E.g., right version of Windows that doesn't allow copying movie data (DRM).
+  E.g., some trustworthy VMM or bootloader for running a VM on a server.
+  Will talk more about cryptographic protocols in later lectures.
+
+Can encrypt data in a way that's only accessible to specific software.
+  Use TPM_seal, TPM_unseal.
+  Sealed data can be decrypted only by chosen recipient (PCR).
+  Each TPM has its own randomly-generated key for encryption.
+  E.g., Bitlocker: give key to legitimate OS, let OS verify user's credentials.
+
+Bitlocker's TPM mode: key stored in TPM.
+  Idea: store key in the TPM (or rather, seal it using the TPM).
+    Advantage: no need for user to interact with the BIOS.
+  What's the point of TPM-only mode?
+    Key can only be obtained if the machine boots up the same OS (Windows).
+    As a result, security boils down to whatever plan Windows has.
+    One possibility: user has Windows password.
+      Why is this better than the password-in-BIOS approach?
+      1. No need to enter password twice: in BIOS and in Windows.
+      2. Windows can rate-limit login attempts, prevent pw guessing.
+    Another possibility: user cannot access sensitive data directly.
+      User might have to access sensitive data via privileged process.
+      Privileged process will not divulge entire data set.
+
+What gets measured at boot in BitLocker?
+  Two partitions on disk.
+  First partition contains BitLocker's bootstrapping code.
+  Second partition contains encrypted data ("OS volume").
+  First partition measured at boot.
+  BitLocker's key sealed with first partition's PCR measurement.
+  Why not measure the second partition?
+    Changes frequently.
+    Need a more efficient "authentication" plan.
+    Expectation: adversary won't be able to meaningfully change it.
+  What if we need to upgrade the first partition?
+    One possibility: re-seal key with new PCR value before upgrade.
+  What if we need to upgrade laptops?  Or, laptop died and need to recover?
+    Disk encryption key is stored encrypted with a recovery password.
+    (Or, stored in Active Directory encrypted with admin's password.)
+    User can type in their recovery password to gain access to disk.
+
+How do we encrypt the disk once we have the key?
+  Encrypt disk blocks (sectors) one-at-a-time.
+  Why one-at-a-time?  Atomicity, performance.
+
+Potential problem: integrity (adversary can modify sectors on disk).
+  Why is this a problem for a disk encryption scheme?
+  Why is it insufficient to do secure boot (check signatures on code)?
+  What are the options for ensuring integrity?
+    Ideally, store a MAC (~keyed hash) for the sector somewhere on disk.
+    Recall, disks write sectors at a time: need one MAC per sector.
+    Store MAC in adjacent sector: effectively cut space by a factor of 2,
+      and might also break atomicity if disk crashes between 2 sector writes.
+    Store MAC in a table elsewhere: two seeks (and breaks atomicity).
+    Store MACs for group of sectors nearby: breaks atomicity.
+  Where can we store MACs for integrity?
+    Buy really expensive disks (NetApp, EMC) that have jumbo sectors.
+    "Enterprise" disks have 520-byte sectors, instead of standard 512.
+    Extra 8 bytes used to store checksums, transaction IDs, etc.
+    Could be used to store MAC.
+    Not going to fly for common machines.
+
+BitLocker approach: "poor-man's authentication"
+  Assume adversary cannot change the ciphertext in a "useful" fashion.
+  I.e., cannot have a predictable effect on the plaintext.
+
+When would this work or not?
+  Works if applications detect or crash when important data is garbled.
+  Must be true at sector-level, which attacker can corrupt separately.
+  Probably true for code: random instructions will raise an exception.
+  Worst case for data: 1 bit (e.g., "require login?") alone in a sector.
+  Adversary can guess random ciphertexts, see when that bit changes.
+  If application doesn't notice other bits corrupted, game over.
+  Hopefully this is not how the registry is constructed, so maybe OK..
+
+How does Bitlocker achieve poor-man's authentication?
+  Tweak symmetric encryption scheme.
+  Goal: localized changes to ciphertext influence entire block.
+  Existing schemes don't have this property (e.g., encrypt 128 bits at a time).
+  So, Bitlocker introduces a shuffling step; details not terribly relevant here.
+
+What about freshness?
+  Harder to achieve: need to have some state that can't be rolled back.
+  Strawman: hash all blocks, store hash in TPM.
+  Problem: updates require re-hashing entire disk, slow.
+  Idea: tree of hashes (Merkle tree).
+  Even that is often too expensive to update.
+
+Potential attacks on BitLocker?
+  Not intended to be a perfect security solution, by design.
+  Hardware attacks: DMA, cold boot attacks, ..
+  Security vulnerabilities in Windows (buffer overflows, root access).
+  Rolling back disk blocks to an old version (i.e., violate freshness).
+    Adversary likely doesn't have interesting old blocks.
+    Hard (expensive in terms of performance) to defend against.
+
+No vulnerabilities found in design so far (8 yrs), modulo threat model.
+  Attacks mostly focus on extracting key from Windows kernel's memory.
+  Hardware attacks:
+    DMA via devices like Firewire.
+    Attack interconnect between CPU and TPM.
+  Software attacks: install a kernel module as administrator; get memory dump.
+    Requires first bypassing access control in Windows in some way.
+  Goal was to increase cost of attack, and BitLocker appears to succeed at it.
+
+Similar ideas show up in Intel SGX for protecting memory against physical attacks.
+  Encrypt memory contents.
+  Also do authentication and freshness "for real".
+
+Physical attacks subsume software attacks.
+  SGX uses memory encryption to also protect against OS being compromised.
+  Hardware provides a new mode of execution called an "enclave".
+  Enclave memory gets encrypted, authenticated.
+  If untrusted OS tampers with enclave memory, just a special case of physical attack.
+
+Alternative to BitLocker's sector encryption: filesystem-level encryption.
+  E.g., ecryptfs in Linux, used by Ubuntu's home directory encryption.
+  FS can solve atomicity/consistency problems.
+  FS can find space for extra MACs, random IVs to prevent IV reuse, etc.
+  FS might require much more code to be "measured" into the TPM.
+    FS comes up much later in the boot process.
+    Requires TPM re-sealing for FS upgrades, driver upgrades, etc.
+  FS might not interpose on swapping/paging.
+  FS harder to deploy (changes to FS, cannot deploy incrementally).
+
+What other security properties might users want from memory/disk encryption?
+  Data secrecy: adversary that gets access to disk cannot get data.
+    Bitlocker mostly gets this, modulo being deterministic.
+  Data integrity: adversary cannot replace data on disk without detection.
+    Bitlocker relies on "poor man's authentication".
+  Data freshness: adversary cannot roll back to an old version without det.
+    No protection against this in Bitlocker.  Works for their threat model.
+
+Side-channel attacks and Spectre 
+================================
+
+Side channel attacks: historically worried about EM signals leaking.
+  [ Ref: http://cryptome.org/nsa-tempest.pdf ]
+  Broadly, systems may need to worry about many unexpected ways in which
+    information can be revealed.
+
+Many information leaks have been looked at to extract crypto keys
+  How long it takes to decrypt.
+  How decryption affects shared resources (cache, TLB, branch predictor).
+  Emissions from the CPU itself (RF, audio, power consumption, etc).
+
+Many side-channel attacks are not crypto-related.
+  Operation time relates to which character of password was incorrect (see Tenex below)
+  Or time related to how many common friends you + some user have on Facebook.
+    If attacker want to find out how many shared friends
+  Or how long it takes to load a page in browser (depends if it was cached).
+    If attacker wants to find out if someone looked a particular page
+  Or recovering printed text based on sound from dot-matrix printer.
+    [ Ref: https://www.usenix.org/conference/usenixsecurity10/acoustic-side-channel-attacks-printers ]
+  Or network traffic timing / analysis attacks.
+    Even when data is encrypted, its ciphertext size remains ~same as plaintext.
+    Recent papers show can infer a lot about SSL/VPN traffic by sizes, timing.
+    E.g., Fidelity lets customers manage stocks through an SSL web site.
+      Web site displays some kind of pie chart image for each stock.
+      User's browser requests images for all of the user's stocks.
+      Adversary can enumerate all stock pie chart images, knows sizes.
+      Can tell what stocks a user has, based on sizes of data transfers.
+    Similar to CRIME attack mentioned in Paul Youn's lecture earlier this term.
+    Or https://blog.appcanary.com/2016/encrypt-or-compress.html
+  But attacks on passwords or keys are usually the most damaging.
+
+Famous password timing attack (Tenex operating system)
+  Time page-faults for password guessing.
+  Suppose the kernel provides a system call to check user's password.
+    Checks the password one byte at a time, returns error when finds mismatch.
+    (Tenex stored the password as plaintext.)
+  Adversary aligns password, so that first byte is at the end of a page,
+    rest of password is on next page.
+  Somehow arrange for the second page to be swapped out to disk.
+    Or just unmap the next page entirely (using equivalent of mmap).
+  Measure time to return an error when guessing password.
+    If it took a long time, kernel had to read in the second page from disk.
+    [ Or, if unmapped, if crashed, then kernel tried to read second page. ]
+    Means first character was right!
+  Can guess an N-character password in 256*N tries, rather than 256^N.
+  [ Ref: http://xeroxalto.computerhistory.org/_cd8_/pup/.plfsup.mac!2.html ]
+    Not quite the original code, but similar: [chkpsw] calls [stcmp] to compare.
+
+Cache timing attacks: dm-crypt in Linux.
+  [ Ref: https://www.cs.tau.ac.il/~tromer/papers/cache-joc-20090619.pdf ]
+
+What's new with Spectre and Meltdown attacks?
+  Caused people to adjust their threat model
+    Side channels were assumed away
+    Now micro-architectural side channels are real
+    $ grep . /sys/devices/system/cpu/vulnerabilities/*
+  Exploit using speculative execution
+    Standard processor feature to get high performance
+  Adversary has some control over speculative execution
+    Big difference from earlier cache timing attacks
+  Speculative execution has observable side effects
+    Brings values into cache, even on miss
+  Breaks process isolation
+    Attacker probes cache
+    High bandwidth side channel
+  Architectural side channel
+    Not easy to address
+    Several workarounds
+  Danger: exploitable remotely through Javascript, WebAssembly, ..
+
+Processor features exploited
+  Both features to obtain high performance
+  Speculative execution
+    if cond {
+       ...
+    }
+    Processors guess branch and speculative execute instructions
+    On today's processor it may be many instructions
+    On failed speculation clean up processor state
+      registers, etc.
+  Caching
+    Processors have several levels of caches
+      Last level is shared
+    On failed speculation, data stays in cache
+
+Many attack variants
+  1. Bound check bypass (Spectre)
+  2. Branch target injection (Spectre)
+  3. Data access bypasses protection checks (Meltdown)
+  4. ... any other micro-architectural side channel ...
+  Surprisingly long list of attacks.
+    E.g., see https://dl.acm.org/doi/pdf/10.1145/3492321.3519559
+
+  First look at variant 3, and then come back to variants 1+2
+
+Outline of exploit of variant 1
+  Kernel has a secret byte
+    E.g., offset for Address Space Randomizaton
+  Kernel has a code fragment ("gadget") as follows
+    if (offset_from_attacker < sz) {   // attacker arrange miss on sz
+      // trains the branch predictor to speculatively executes this branch
+      // arrange that array1 is in cache so that the following
+      // instruction runs quickly and there is time to start next one
+      v = array1[offset_from_attacker]  // read secret byte
+      // attacker cannot read v, but arranges array2 is not in the cache and uses v
+      v1 = array2[v]                   
+    }
+  Once speculation fails, processor squashes internal processor state
+    But doesn't remove array2[v] from cache
+    External to the processor
+  Attacker measures time to read of
+    array2[0]
+    array2[1]
+    if one them is fast, then attacker knows value of v
+
+Concrete example: appendix A
+  [ lec/spectre.c ]
+  [ show code, compile wo optimizations, and run ]
+  Illustrative
+    Not a real attack
+    Victim and attacker code in same address space
+  Victim code
+    Gadget is present
+    Secret
+    why unused1? unused2? (force size to be in different cache line from array1)
+  Main function
+    Try to read secret a byte at the time
+    Using readMemoryByte
+      malicious_x is the offset_from_attacker
+    Uses cache measurements to read byte
+  ReadMemoryByte
+    Does 1,000 tries -- why?
+      But breaks earlier
+    Flush caches
+      why 256?  (a byte has 256 possible values)
+      why 512?  (prefetch?)
+    Train branch predictor
+      Why complicated way of computing x
+      Invoke victim's gadget
+    Time every possible value
+      Count cache hits
+  Bandwidth of side channel
+    10KB/s
+
+To make attack real:
+  Find gadget in victim process
+  Attacker process must be able to access array2
+  Evict sz in victim process
+  Evict array2 in victim process
+  Train predictor in victim process
+
+"Real" attack: steal secret from victim process on Windows
+  Exploit the presence of DLL (dynamically-loaded library)
+  Mapped in each process address space
+    Which can be read and clflushed'd by any process
+    Can even be written
+
+"Real" attack: steal secret from Linux kernel
+  [Ref: https://googleprojectzero.blogspot.com/2018/01/reading-privileged-memory-with-side.html]
+  Exploit eBFP in kernel
+  Two filters:
+    1. to train BP and find address of "array2"
+    2. to leak secret data
+  Measure array2 from user space
+    User space is mapped in kernel address space
+
+Discussion
+  Attack breaks process isolation
+    Serious attack!
+  Attacker can be remote
+    Attack can be performed from JavaScript
+  Any micro-architecural state maybe a side channel
+    Branch predictor, write-buffer, cache-coherence directory, ...
+
+Variant 2
+  Kernel code:
+    if (off < sz) {
+        v = array1[off] 
+        (*f)()  // an f that read memory depending on v
+    }
+  Processor may speculative executes f
+    important for object-oriented code
+  Attacker chooses convenient f in kernel
+    Like a return-to-libc attack
+  Requires reverse engineering of branch predictor
+    To train it to invoke the chosen f
+  
+Variant 3
+  User-space code:
+    mov rax, [some_kernel_address]
+    and rax, 1
+    mov rbx, [rax+some_user_mode_address]
+  First instruction is several micro operations
+    check and load
+  Processor execute instructions out of order
+    first load, then check
+    memory isn't committed, but address is in cache
+    use flush+reload probe to measure if address is in cache
+  Works because one address space with kernel and use
+    Kernel-code is present in user process's page table
+    Kernel code is mapped not readable by user code
+
+Fairly real attack using "variant 3": stealing keys from SGX enclaves
+  See https://www.usenix.org/system/files/conference/usenixsecurity18/sec18-van_bulck.pdf
+
+Mitigations.
+  Variant 1.
+    Linux kernel: Code analysis to avoid vulnerable code
+      modify code to constraint index in gadget code
+      https://lwn.net/Articles/752408/
+      include/linux/nospec.h
+      For example:
+	 if (index < ARRAY_SIZE)
+	     // array_index_nospec() blocks speculation
+	     index = array_index_nospec(index, ARRAY_SIZE);
+	     return array[index];
+	 }
+    Browsers: avoid generating vulnerable code
+      https://v8.dev/blog/spec
+  Variant 2. Microcode update and kernel patches (e.g., retpoline)
+    a return trampoline (https://support.google.com/faqs/answer/7625886)
+      has an infinite loop that is never executed
+      prevents the CPU from speculating on the target of an indirect jump
+    slows down all indirect jumps
+      but another plan (optpoline) resolves indirect jumps at runtime
+      and replaces them with direct jumps
+      https://lwn.net/Articles/774743/
+  Variant 3. Kernel page table isolation (KPTI)
+    [Ref: https://en.wikipedia.org/wiki/Kernel_page-table_isolation]
+    Developed before Meltdown was known
+    Two page tables: one for kernel and one for user
+  Harden browser
+    No precise timing info
+  Performance overheads
+    See https://dl.acm.org/doi/pdf/10.1145/3492321.3519559
+
+Other observable side effects of speculative execution
+  Power consumption
+  Bus traffic
+  ...
+
+Other types of timing attacks.
+  Cache analysis attacks: processor's cache shared by all processes.
+    E.g.: accessing one of the sliding-window multiples brings it in cache.
+    Necessarily evicts something else in the cache.
+    Malicious process could fill cache with large array, watch what's evicted.
+    Guess parts of exponent (d) based on offsets being evicted.
+  Cache attacks are potentially problematic with "mobile code".
+    WASM modules, Javascript, etc running on your desktop or phone
+    Mobile code is untrusted, and may come from an attacker
+    It is sandboxed, but it still may be able to measure side channels
+
+How to stop side channels?
+  Remove side channels
+    E.g., redesign processor to not commit to cache
+    But every shared resource could be a side channel
+  Reduce shared resources when processing secret data
+    Process confidential data on a separate core
+    With its own cache, etc.
+    Requires refactoring of software --- not easy
+  Measure channel and make them low bandwidth
+    Hard to exploit
+
+References:
+  https://googleprojectzero.blogspot.com/2018/01/reading-privileged-memory-with-side.html
+  https://cyber.wtf/2017/07/28/negative-result-reading-kernel-memory-from-user-mode/
+  https://eprint.iacr.org/2013/448.pdf
+  http://css.csail.mit.edu/6.858/2014/readings/ht-cache.pdf
+  http://www.tau.ac.il/~tromer/papers/cache-joc-20090619.pdf
+  http://www.tau.ac.il/~tromer/papers/handsoff-20140731.pdf
+  http://www.cs.unc.edu/~reiter/papers/2012/CCS.pdf
+  http://ed25519.cr.yp.to/
+  http://cseweb.ucsd.edu/classes/fa05/cse240a/bp.pdf
+
+Side-channel attacks on RSA
+  [ Ref: https://crypto.stanford.edu/~dabo/papers/ssl-timing.pdf ]
+  Victim Apache HTTPS web server using OpenSSL, has private key in memory.
+    Goal: extract private key
+  The basic plan is like Tenex system.
+    Guess a bit at the time.
+    But operations on server are noisy and so attack more complicated.
+  Connected to Stanford's campus network.
+  Adversary controls some client machine on campus network.
+  Adversary sends specially-constructed ciphertext in msg to server.
+    Server decrypts ciphertext, finds garbage padding, returns an error.
+    Client measures response time to get error message.
+    Uses the response time to guess bits of q.
+  Overall response time is on the order of 5 msec.
+    Time difference between requests can be around 10 usec.
+  What causes time variations?  Optimizations to implement RSA efficiently
+    Karatsuba vs normal; extra reductions.
+  About 1M queries seem enough to obtain 512-bit p and q for 1024-bit key.
+    p and q are the two primes that RSA uses to construct public and secret key
+    Only need to guess the top 256 bits of p and q, then use another algorithm.
+  Counter measures are needed (e.g., RSA blinding)
+
+How worried should we be about RSA timing attacks?
+  Relatively tricky to develop an exploit (but that's a one-time problem).
+  Possible to notice attack on server (many connection requests).
+    Though maybe not so easy on a busy web server cluster?
+  Adversary has to be close by, in terms of network.
+    Not that big of a problem for adversary.
+    Can average over more queries, co-locate nearby (Amazon EC2),
+      run on a nearby bot or browser, etc.
+  Adversary may need to know the version, optimization flags, etc of OpenSSL.
+    Is it a good idea to rely on such a defense?
+    How big of an impediment is this?
+  If adversary mounts attack, effects are quite bad (key leaked).
+Privilege separation in OpenSSH
+===============================
+
+Starting a new module in this class: case studies of system design for security.
+  Big theme in many of these case studies: privilege separation.
+  Privilege separation is also the focus of lab 2.
+
+Problem: exploitable bugs in software.
+  Software is complex -> bugs -> exploits.
+  What to do about this?
+
+Plan A: find them, fix them, avoid making new ones.
+  We will talk about various techniques like this in the next module.
+  Much progress here, but for large software systems, not enough.
+
+OpenSSH example from this paper.
+  Listening process runs as root, accepts connections on port 22.
+    Need root privilege to bind to port 22.
+    Need root privilege for subsequent operations.
+  Forks off new process for each incoming connection.
+    Processes arbitrary network messages.
+    But still runs as root (will need to check password, start shell, etc).
+  Lots of code that could be buggy.
+    zlib for compression over the network.
+    Parsing network packets.
+    Encryption, key exchange.
+    Authentication: checking password, challenge-response, etc.
+    Starting a shell.
+    Re-keying after some period of time.
+  Bugs can be quite damaging.
+    Buffer overflows and such, as in lab 1.
+    But also leaking sensitive memory contents (like the private key).
+    Or accessing the wrong files as root.
+  This "hard shell, soft inside" setup makes bugs devastating.
+
+Plan B: build systems that are secure even if there are bugs.
+  Can we do anything like this?
+
+Goal: principle of least privilege.
+  Each component should have the least privileges needed to do its job.
+
+Big idea: privilege separation.
+  Divide up the s/w and data to limit damage from bugs.
+  Two related benefits:
+    Limit damage from successful exploit -- "least privilege".
+    Limit attacker's access to buggy code -- "attack surface".
+
+Privilege separation is difficult.
+  Need to come up with a fruitful separation plan.
+  Need to isolate (client/server, VMs, containers, processes, SFI, &c).
+  Need to allow controlled interaction (narrow API, meaningful security checks).
+  Need to retain good performance (few domain crossings on critical path, etc).
+  Need to refactor the software to work with separation plan.
+
+System designer must choose the separation plan(s):
+  by service / type of data (friend lists vs passwords)
+  by user (my e-mail vs your e-mail)
+  by buggyness (image resizing vs everything else)
+  by exposure to direct attack (network message parsing vs everything else)
+  by inherent privilege (hide superuser processes; hide the keys or DB; etc)
+
+Separation plan is highly application-dependent.
+  Today's paper: OpenSSH case study.
+  Lab 2: web application privilege separation.
+  Different plans, though similar underlying principles.
+
+How does OpenSSH choose to do privilege separation?
+  Privileged listening process (runs as root) accepts incoming connections.
+  Privileged monitor process (runs as root) per connection.
+  Unprivileged worker process for doing much of the connection work.
+    Network message parsing, crypto protocol, key exchange, compression, ...
+    TCP connection is passed to the unprivileged worker process.
+  Worker process gets re-spawned after authentication.
+    Mostly a detail due to how user ID can be set for a process.
+  Eventually spawns a user shell process.
+    Worker process stays around, handling the encrypted network session.
+
+What privileged operations need to happen for each connection?
+  Protocol requires signing a message with server's host private key.
+  Need to check user's password.
+  Need to authenticate user with public-key auth (challenge-response).
+  Need to allocate a pseudo-terminal for user's login session.
+  Need to start shell with user's UID.
+
+Most of these privileged operations require root privilege on Unix.
+  E.g., host private key file is only readable by root.
+  This is why OpenSSH used to run as root.
+
+How does the unprivileged worker do all of these operations?
+  Privilege separation defines a new interface, between worker and monitor.
+  Enumerated list of operations that can be requested.
+    [ Ref: https://github.com/openssh/openssh-portable/blob/master/monitor.h ]
+  Monitor process will perform just these corresponding operations.
+    [ Ref: https://github.com/openssh/openssh-portable/blob/master/monitor.c ]
+  Tight control over which operations are allowed at what point.
+    E.g., MON_ONCE and MON_AUTH flags.
+    Can only do certain operations one time (sign with server's private key).
+    Can only do certain operations after supplying valid username (check pw).
+
+Meaningful security boundary between child worker process and monitor parent.
+  Should assume that worker child process is compromised.
+    Adversary can issue arbitrary requests to the monitor.
+  Monitor process has full root privileges.
+  But the operations that it exports are much less damaging.
+    Can't get private key, can only sign with it.
+    Can't get list of users, can only check a particular user name.
+    Can't get password file, can only check a user's password.
+    Etc.
+
+What's the attack surface of the worker process?
+  Arbitrary network messages.
+  Parsing, compression.
+  Encryption, key exchange implementations.
+
+What's the attack surface of the monitor process?
+  Accepting a network connection.
+  Monitor requests (monitor.h).
+
+What's the attack surface of the listening process?
+  Almost nothing: new TCP connection coming in.
+  No data, just spawns a new monitor process for each accepted connection.
+
+What's the damage if the worker process gets compromised?
+  Could try to log in as a user.
+    But could have mostly done that by trying to log in via ssh, too.
+  Could sign messages using server's host private key.
+    Slightly worrisome: could impersonate server for another connection.
+    But not for future connections: would need to sign future random msg.
+  Post-authentication: could access that user's state.
+    But could have done that just by logging in, too.
+  Post-authentication: could allocate a pseudo-terminal.
+    Not much damage.
+  Could send spam or attack other things from the server machine.
+    Network access not limited for the unprivileged worker.
+  Could run machine out of memory, processes, CPU time, etc.
+    Perhaps could enforce memory/forking limits on worker process.
+
+Why does the challenge-response authentication require the monitor?
+  Could just have the child process generate a random challenge, check sig.
+  A: monitor has to check authentication result, depends on fresh challenge.
+
+What are the mechanisms for isolation and control over sharing?
+  Paper uses Unix processes, user IDs (UIDs), file permissions, and fd passing.
+  What is setuid(uid)?
+    A process can drop its privileges from root to an ordinary uid.
+  What is chroot(dirname)?
+    Causes / to refer to dirname for this process and descendants,
+      so they can't name files outside of dirname.
+  How to prevent interference between worker processes?
+    P_SUGID prevents one process from debugging another process using ptrace.
+    Even though the two processes are running with the same user ID.
+  What is FD passing?
+    One process opens file descriptor, passes it to another process.
+    E.g., monitor allocates a pseudo-terminal, passes fd to worker process.
+
+Challenge: how to set user ID after successful user authentication?
+  Cannot pass user ID as a file descriptor.
+  OpenSSH plan: kill old worker child process, start new one.
+  Need to pass all of the relevant state from old to new process.
+  State (section 4.1):
+    Encryption/authentication algorithms and keys.
+    Network message sequence counters.
+    Buffered network data.
+    Compression state.
+
+UNIX process-level isolation tools are hard to use.
+  Many global name-spaces: files, UIDs, PIDs, ports.
+    Each may allow processes to see what others are up to.
+    Each is an invitation for bugs or careless set-up.
+  No idea of "default to no access".
+    Thus hard for designer to reason about what a process can do.
+  No fine-grained grants of privilege.
+    Can't say "process can read only these three files."
+  No way to limit network access.
+  chroot() and setuid() can only be used by superuser.
+    So non-superusers can't reduce/limit their own privilege.
+    Awkward since security suggests *not* running as superuser.
+
+Lab 2 uses Linux containers (LXC)
+  Didn't exist when authors designed OpenSSH privilege separation.
+  Containers provide the illusion of virtual machines wo. using virtual machines
+    Containers are more efficient than virtual machines
+  Container is a Linux process, but strongly isolated:
+    Limited access to the kernel name spaces
+    Limited access to system calls
+    No access to the file system
+  Containers behave like a virtual machine
+    Started from a VM image
+    Have their own IP address
+    Have their own file system
+  Lab 2 uses *unprivileged* containers
+    These containers run as non-root user processes
+    If the process inside the container runs as root, still limited privileges
+  More difficult to break out of container than chrooted-process
+
+How do the authors add privilege separation to existing OpenSSH code?
+  Step 1: design separation plan.
+    Required some refactoring of the code to expose this boundary.
+  Step 2: RPC wrappers for functions at monitor interface boundary.
+    Example from paper: PRIVSEP(auth_password(authctxt, pwd)).
+    When PRIVSEP is disabled, this is just auth_password(authctxt, pwd).
+    When PRIVSEP is enabled, this is mm_auth_password(authctxt, pwd).
+    mm_auth_password() is an RPC client stub.
+    [ Ref: https://github.com/openssh/openssh-portable/blob/master/monitor_wrap.c ]
+  Step 3: send current state to monitor when authentication succeeds.
+    [ Ref: https://github.com/openssh/openssh-portable/blob/master/sshd.c call to mm_send_keystate() ]
+    And correspondingly, unpack this state when monitor starts new worker process.
+
+Challenge: privilege separation for existing libraries.
+  Example problem in OpenSSH: pre-authentication worker used zlib for compression.
+    zlib allocated its own buffers.
+    How to transfer those buffers to new post-authentication worker?
+  OpenSSH solution: give zlib a special malloc/free implementation.
+    Allocates memory in a shared memory region.
+    This shared memory region will get passed to new worker as-is.
+  Good: transparent to existing code (like zlib).
+    Many privilege separation libraries/toolkits play such games.
+  Bad: complicated interface with monitor process.
+    But at least monitor doesn't look at this shared memory region.
+    Just passes shared memory to new post-authentication worker process.
+  Bad: could have corrupted pointers, will cause arbitrary errors in worker.
+    Probably not too bad, because requires being able to log in as user.
+
+Shared memory allocation was removed.
+  For cryptographic reasons, pre-authentication compression was undesirable.
+  Shared memory allocation code was complex.
+    Bugs in it due to undefined behavior, even.
+    [ Ref: https://github.com/openssh/openssh-portable/commit/0082fba4efdd492f765ed4c53f0d0fbd3bdbdf7f ]
+  Removed in 2016 by not doing compression in pre-auth slave process.
+
+Where should an attacker look for weaknesses?
+  Might be bugs in the worker process, good starting point.
+  Bugs in OS kernel.
+    Exploit kernel bug, become root, break out of isolation.
+  Bugs in monitor's authentication code.
+    Buffer overflow, logic error, crypto mistakes.
+    Incorrectly authenticate as victim user.
+
+How secure is the resulting privilege-separated OpenSSH?
+  Section 5.
+  One measure of potential security vulnerabilities: lines of code.
+    Unprivileged worker is about 2/3 of the code.
+    Privileged monitor is about 1/3 of the code.
+    Fewer lines of code -> fewer bugs.
+  Another measure: attack surface.
+    Unprivileged worker: arbitrary network messages.
+    Privileged monitor: well-defined interface, few operations, fixed structure.
+    Relatively less likely to have memory corruption, etc?
+  Empirical case study: many previous vulnerabilities would have been prevented.
+    Pre-authentication: integer overflow in network packet processing code.
+    Pre-authentication: zlib bug.
+    Post-authentication: off-by-one error in channel code.
+    Post-authentication: Kerberos ticket passing.
+  Privilege separation helps even with post-authentication bugs.
+    Used to continue running as root, due to key re-negotiation (need to sign).
+
+What's the performance overhead?
+  Described/deployed design: virtually no performance overhead!
+    Section 6.
+  Fast because privilege separation is not on the critical path for data xfer.
+    After login, everything works basically the same as without privsep.
+  Minor overhead for establishing new connection / login, but not significant.
+  Direct result of carefully choosing the right privilege separation interface.
+
+Alternative design ("3 process") from section 4.3 would be slower.
+  Would avoid the need for complex state transfer.
+  Existing worker keeps handling encryption/compression on network connection.
+  New worker handles user session.
+  Introduces some overhead in steady-state: more context switching.
+
+OpenSSH still uses this basic privilege separation design today.
+  Relatively minor changes (like getting rid of shared memory stuff for zlib).
+
+OpenSSH has some unique aspects that play into its privilege separation plan.
+  Every connection is largely independent.
+    Shared state is in the files that the user can access after logging in.
+    Not really OpenSSH's problem.
+  One privileged monitor process, relatively few privileged resources.
+    Server private key, password database, ability to setuid().
+
+Other systems we will look at are quite different.
+  Web applications: lab 2 and Thursday's Google paper.
+  Many different resources (user authentication, databases, services, etc).
+  Stateful services (e.g., DB) rather than starting a fresh worker each time.
+  Dynamic permissions (e.g., Google's user permission tickets).
+  Security architecture
+=====================
+
+What is "security architecture"?
+  Structuring of entire systems in order to:
+    Defend against large classes of attacks
+    Prevent as-yet-unknown attacks
+    Contain damage from successful attacks
+  We want to get ahead of attackers
+    And not just react by e.g. applying patches
+
+Security architecture consists of:
+  Ways of analyzing the security situation
+    What are we defending? Credit cards ? Crypto keys? Trade secrets? Everything?
+    Who is the attacker? Spammers? Employees? Vendors? Customers? Competitors?
+    What powers are we assuming attack does/doesn't have?
+    (all this is usually called the Threat Model)
+  Principles
+    Minimize trust
+  Techniques
+    isolation, authentication, privilege separation, secure channels, &c
+
+Case study: Google Security Architecture paper
+  Paper focuses on Google's cloud platform offering.
+  Does not describe all security aspects of all Google services.
+  The paper touches on many interesting, complex topics.
+  Good overview of what a security architecture can look like.
+  See Butler Lampson's talk for discussion of principles.
+    [[ Ref: http://css.csail.mit.edu/6.858/2015/lec/lampson.pdf ]]
+
+Google is unique, but paper is super useful even if you're not Google.
+  Google's uniqueness: designed and developed many ideas and infrastructure.
+    Also physical / hardware security that's costly to replicate.
+  Many components now available for anyone to use.
+    Can benefit from Google's data center security by using a cloud provider.
+      Google and other cloud providers (AWS, Azure) have similar plans.
+    Cloud providers offer isolation, controlled sharing, authentication, etc.
+      [ Ref: https://aws.amazon.com/blogs/security/building-fine-grained-authorization-using-amazon-cognito-api-gateway-and-iam/ ]
+    Many components are open-source.
+      Kubernetes, gRPC, security libraries, bug-finding tools, fuzzing, ...
+    Integrated development / deployment services, "devops" / CI-CD.
+  Paper illustrates systematic thinking about wide range of possible threats.
+    Useful separately from whether you're building or using Google's tools.
+
+Why would Google publish a document like this?
+
+What are the security goals in the Google paper?
+  Avoid disclosure of customer data (e.g., e-mail).
+  Ensure availability of Google's applications.
+  Track down what went wrong if a compromise occurs.
+  Help Google engineers build secure applications.
+  Broadly, ensure customers trust Google.
+
+Worried about many threats; examples:
+  Bugs in Google's software
+  Compromised networks (customer, Internet, Google's internal)
+  Stolen employee passwords
+  Malware on employee workstations / smartphones
+  Insider attacks (bribing an engineer or data center operator)
+  Malicious server hardware
+  Data on discarded disks
+
+What's the Google server environment?
+  Data centers.
+  Physical machines.
+  Virtual machines.
+  Services in VMs.
+  Applications (both Google's and customer) in VMs.
+  RPC between applications and services.
+  Front-end servers convert HTTP/HTTPS into RPC.
+
+Isolation: the starting point for security
+  The goal: by default, activity X cannot affect activity Y
+    even if X is malicious
+    even if Y has bugs
+  Without isolation, there's no hope for security
+  With isolation, we can allow interaction (if desired) and control it
+
+Examples of isolation in Google's design?
+  [[ "Service Identity, Integrity, and Isolation" ]]
+  Linux user separation.
+  Language sandboxes.
+  Kernel sandboxes.
+  Virtual machines.
+  Dedicated machines, for particularly sensitive services.
+
+What is isolation doing for Google?
+  Let's look at virtual machines.
+  Each physical machine has a host VMM, which supervises many guest VMs.
+  Each guest VM runs an O/S &c.
+  Allows sharing of machines between unrelated activities.
+    Many activities need only a fraction of a machine.
+  One point: VMM helps keep out attackers in other VM guests.
+    Google storage server in one VM, customer in another VM, or
+    Storage in one VM, compromised Google Contacts service in another VM.
+  Another point: VMM helps keep attackers *in* -- confinement.
+    It is safe to run almost any code in a VM guest, even in guest kernel.
+    As long as we can control who it talks to over the network.
+  Do VMs provide perfect isolation between guests?
+
+Controlled sharing on top of isolation.
+  Need to decide what operations should be allowed.
+  Three steps for controlled sharing ("gold standard"):
+    Authenticate: determine which principal is sending request.
+    Authorize: determine which operations are allowed.
+    Audit: log operation for later auditing.
+      Google: "Access transparency".
+
+Authentication principals in Google's design.
+  RPC system: services, engineers.
+  Also end-user identity, but above RPC.
+
+Examples of authorization plans in Google's design?
+  [[ "Inter-Service Access Management" ]]
+  Administrator white-lists who can use each service.
+    Principals = other services, engineers.
+    Automatic enforcement by the RPC infrastructure.
+  "End-user permission ticket" (e.g., to access Contacts service).
+    Rights to perform operations on behalf of an end-user.
+    Ticket is short-lived to limit damage if stolen.
+  Both are particularly slick and unusual aspects of Google's architecture.
+
+Much of Google's paper is a reaction to weaknesses of perimeter defense.
+  No story for anything going wrong inside.
+  i.e. no second line of defense if successful penetration.
+
+Motivated by some early attacks against Google.
+  [ Ref: https://en.wikipedia.org/wiki/Operation_Aurora ]
+  [ Ref: https://www.youtube.com/playlist?list=PL590L5WQmH8dsxxz7ooJAgmijwOz0lh2H ]
+
+Paper essentially does controlled sharing at a service level.
+  Guard = accept RPCs only from approved client services.
+  e.g. GMail can talk to Contacts, but other services can't.
+  
+This is an example of Least Privilege.
+  Split up the activities, isolate them.
+  Give each activity only the privileges it needs.
+
+Google's end-user permission tickets reduce privilege even further.
+  RPC must be from approved service, user must actually be logged in!
+  Motivation: limit damage from buggy requesting services asking for wrong data.
+  Motivation: limit insiders' ability to access arbitrary user data.
+  Perhaps tickets are also tied to data encryption in Google's architecture!
+
+How does one service authenticate request from another?
+  We need "secure channels" over the network.
+  Cryptography: encrypt/decrypt, sign/verify.
+  Signatures proves who sent a message (integrity).
+  Encryption ensures only intended recipient can read (confidentiality).
+  Thus:
+    Google servers (probably) sign RPCs to other servers.
+      RPC system automatically limits who can talk to who.
+    RPCs are encrypted between data centers, over the internet.
+    Maybe also encrypted within data center (why?).
+
+Cryptography shifts challenges to key management.
+  E.g. when GMail service talks to Contacts service.
+  RPC sender needs to know what key to encrypt with.
+  RPC receiver needs to know who corresponds to signing key.
+  Google clearly runs a name service, mapping service names to public keys.
+
+How does Google know it's safe to use a particular computer as a server?
+  Using a server means Google has to trust its hardware/BIOS/&c:
+    Sensitive data, crypto keys, RPC authorization.
+  Why might there be a problem -- what attacks?
+    Attacker physically swaps their own server for one of Google's.
+    Attacker breaks into a good server, changes the O/S on disk.
+    Vendor ships Google a machine with corrupt BIOS.
+    Attacker breaks into a good server, "updates" BIOS to something bad.
+  What's Google's defense strategy?
+    (Lots of guesses here, we'll look at real designs later)
+    They design their own motherboards, and their own "security chip".
+    Security chip intervenes during boot process.
+    Security chip checks that BIOS and O/S are signed by Google's private key.
+    Security chip has a unique private key tied to a particular machine.
+    Security chip is willing to sign statements when asked by the software.
+      Statement includes identity (hash) of booted BIOS and O/S.
+    Google services require authentication including chip signed statement.
+    Google services can check a client's signed statement:
+      Google has DB of security chip public keys for all machines it purchased.
+      Google has a DB of acceptable BIOS and O/S hashes.
+  [ Ref: https://cloud.google.com/blog/products/identity-security/titan-in-depth-security-in-plaintext ]
+  So: what if data center employee inserts machine with correct IP address?
+  So: what if vendor ships Google a machine with BIOS that snoops?
+
+Availability: DoS attacks.
+  The problem:
+    Attacker wants to take your web site off the air, or blackmail you.
+    They assemble a "botnet" of 10,000 random Internet machines.
+    They sent vast quantities of requests to your web site.
+
+  Many kinds of resources might be the target for a DoS attack.
+    Network bandwidth.
+    Router CPU / memory.
+      Small packets, unusual packet options, routing protocols.
+    Server memory.
+      Protocol state (SYN floods, ..)
+    Server CPU.
+      Expensive application actions.
+
+  A core DoS problem: hard to distinguish attack traffic from real traffic.
+
+  Some broad principles to mitigate DoS attacks.
+    Massive server-side resources, with load spreading/balance.
+    Authenticate as soon as possible.
+    Minimize resource consumption before authentication.
+      E.g. minimize server-side TCP connection setup state.
+    Factor out components that handle requests before authentication.
+      Google: GFE, login service.
+    Limit / prioritize resource use after authentication.
+      Legitimate authenticated users should get priority.
+
+  Google also implements various heuristics to filter out requests in GFE.
+
+Implementation.
+  Trusted Computing Base (TCB): code responsible for security.
+    Keep it small.
+    Depends on what the security goal is.
+    Sharing physical machines in Google's cloud: KVM.
+  Verification.
+  Design reviews.
+  Fuzzing, bug-finding.
+    Red-team / rewards program.
+  Safe libraries to avoid common classes of bugs.
+  "Band-aids" / "defense in depth" increases attack cost.
+    Firewalls, memory safety, intrusion detection, ...
+
+How to know these source code rules are applied to actual services?
+  Integrated build / deployment system, Borg.
+    Open-source offshoot: Kubernetes.
+  Borg is in charge of running services across machines.
+  Borg also is in charge of building source code to produce binary.
+  Operators specify policy in terms of what software should run.
+  Borg ensures policies are followed for source code.
+  Borg takes care of building, testing, deploying the resulting binary, etc.
+  Keeps log of deployed versions, in case a bug is later discovered.
+
+Summary of security architecture.
+  Isolation.
+  Sharing: Authorize/Authenticate/Audit.
+  Secure channels.
+  Hardware root of trust for servers registering with cluster.
+  Integrated software development / build / deployment.
+    Translates software policies to running services.
+  Privilege separation, least privilege.
+  Small TCB, verification / bug-finding.
+  Mobile device security
+======================
+
+What attacks is this design trying to address?
+  Someone steals your iPhone.
+  And wants to extract data from it.
+
+This paper represents a big effort: why might Apple care?
+  Customers who must keep secrets (medical, government, reporters, &c).
+  Ordinary customers nervous about e.g. bank password.
+  Competitive advantage vs e.g. Android.
+  Trying to do the right thing.
+
+The design assumes:
+  Device is passcode-protected.
+  Device is locked at time of theft.
+
+What are potential attacks on a stolen device?
+  Exhaustive search for passcode -- often only four digits.
+  Impersonate user's fingerprint or face.
+  Take apart the phone and remove the flash storage chips.
+    Or read from powered-up RAM.
+  Exploit a bug in the OS kernel.
+    Phone locked -- but USB, WiFi, and radio may be active.
+  Install a hacked version of the OS w/o security checks.
+    Redirect network traffic to adversary's update server?
+    Take apart the phone and write different OS onto flash chips?
+  Down-grade to an old version of the OS that has a known bug.
+
+Reasonably successful design for stolen phones.
+  Much harder to extract data from stolen iPhone than 10 years ago.
+  Even the FBI complains.
+  Though history suggests this is not the end of the story.
+
+iOS hardware architecture:
+  Main CPU.
+  DRAM.
+  Flash file storage.
+  AES encryption engine between main CPU / DRAM and flash storage.
+  Secure enclave CPU.
+  "UID" cryptographic key in enclave hardware.
+    Enclave can encrypt / decrypt but cannot get the UID.
+  Authentication sensors: fingerprint reader, face ID camera.
+
+                     
+                       ECID
+                      Boot ROM   
+  Touch ID           Apple pub key
+   Ktouch   	        Ktouch
+     |             [ Enclave processor |
+     |             |      +            |
+     |             |     UID           |
+[Main CPU + RAM ]----    AES DMA       ----- [ Flash ] 
+
+  
+Interesting aspects of the design, for this lecture:
+  Secure boot.
+  Enclave
+    Hiding of all keys and crypto operations from main CPU.
+    Data encryption gated by passcode.
+    Defenses against exhaustive passcode search.
+    Inter-unit crypto.
+  Data encryption
+    Running back-ground apps (when phone is locked)
+  Next lecture: app isolation and sharing (focusing on Android).
+
+===
+
+Secure boot.
+  Goal: make sure adversary cannot run modified OS / apps / enclave.
+  At power-on, CPU starts executing from Boot ROM.
+    Read-only.
+    Specified at chip fabrication.
+  Boot sequence:
+    Boot ROM -> iBoot -> OS kernel -> apps.
+  Boot ROM checks that iBoot code is signed by Apple.
+  iBoot checks that OS kernel code is signed by Apple.
+  OS kernel checks that apps are signed by developer approved by Apple.
+
+Downgrade attacks.
+  Attack: replace OS kernel with an older one with a known bug.
+    An old OS kernel signed by Apple!
+  Now adversary can exploit an old bug in the old OS kernel.
+  Strawman solution: record versions.
+    E.g., iBoot checks that OS kernel is at least a certain version.
+    Where would the version number be stored?
+    What prevents adversary from modifying the stored version number?
+
+Downgrade prevention with ECID.
+  Each device has a unique ID called the ECID.
+    Read-only, set at chip fabrication time.
+  Apple's servers sign upgrades for a specific ECID.
+  Boot sequence checks signature is for the this phone's ECID.
+  Why does this help?
+    Adversary unlikely to have the old software with victim's ECID.
+    Apple update servers will not sign an out-of-date kernel.
+
+===
+
+Secure enclave.
+  The point:
+    Prevent main CPU from ever seeing crypto keys.
+    Defend against passcode guessing.
+  CPU asks enclave to do things, e.g. help it decrypt.
+  Implemented using a separate CPU.
+    Secure boot sequence, like the main CPU.
+  Shares DRAM with the main CPU.
+    Communicates w/ main CPU through DRAM.
+    Encrypts its own memory contents.
+    Authenticates memory for integrity / freshness.
+    Memory authentication state stored in on-chip SRAM.
+  Compared to SGX?
+    Shares SGX goal of hiding secrets from a not-very-trustworthy kernel.
+    Separate CPU (not a mode).
+    Runs only fixed Apple s/w (not applications).
+
+User authentication using the enclave.
+  Overall plan:
+    All user data is encrypted.
+    Allow decryption when phone is unlocked.
+    Forbid decryption when phone is locked.
+  Why offload authentication onto the secure enclave?
+    Prevent compromised OS kernel from:
+      Getting decryption keys, fingerprint/face data.
+      Bypassing passcode retry limits.
+    Allow hiding of keys &c with memory encryption / auth.
+      So direct read of RAM yields no crypto secrets.
+      Too costly for main CPU, but acceptable for the secure enclave.
+  Primary authentication mechanism: passcode.
+    Decryption keys computed based on passcode (will discuss later).
+  Additional mechanisms: fingerprint, face recognition.
+    Secure enclave caches decryption keys once user enters passcode.
+    Uses these keys if presented with correct fingerprint or face match.
+
+Protecting sensor-to-enclave communication.
+  Attack: compromised OS replays fingerprint reading to secure enclave.
+  Attack: adversary substitutes fake fingerprint sensor.
+  Design: cryptographic authentication between sensors and secure enclave.
+    Sensor has a secret AES key.
+    Enclave knows the same secret key (shared at phone manufacture time).
+    Sensor encrypts and authenticates all data with the AES key.
+    Probably some nonce or session ID to prevent replay of old data.
+
+Facial recognition (sort of an aside, but surprisingly sophisticated)
+  Face camera includes IR dot projector, IR camera.
+  Many IR dots, in a random pattern, are projected onto user's face.
+  IR camera reads the dots, reports them to the secure enclave.
+  May help distinguish 3d face from 2d picture of face.
+
+===
+
+Data encryption.
+  Data = files stored in flash.
+  Attack: adversary takes apart the phone, reads data from flash chips.
+  Plan: encrypt data stored on flash chips.
+
+Why do they generate data encryption keys from passcode?
+  (versus storing the key somewhere permanently)
+  So that keys exist nowhere on device after reboot.
+  So that keys can be forgotten when device locks.
+
+How do they generate data encryption keys from passcode?
+  Danger: only 9999 passcodes, easy to try them all.
+  Danger: attacker extracts flash chips, tries all passcodes
+          in attacker's machine.
+  iOS scheme:
+    Enclave h/w contains unique UID and AES engine.
+    Enclave s/w cannot access UID, can only encrypt/decrypt.
+    Data encryption key is roughly E_UID(E_UID(...(passcode)))
+      i.e. encrypt w/ UID many times.
+    Why?
+      Dependent on passcode, so key exists nowhere on device after reboot.
+      In enclave, which limits number of guesses.
+      Slow, to limit speed of exhaustive search.
+      Dependent on UID, to prevent brute-forcing outside of the device.
+
+Challenge: background apps
+  When phone is locked, some apps must be able run and read/write files
+    E.g., download email attachments
+    But keys are forgotten after device locks
+  Idea: "key wrapping".
+     E_k1(k2)
+  Anyone that knows k1 can obtain k2, by decrypting.
+  Used to delegate: from module that knows k2 to module that knows k1.
+
+File encryption.
+  File system metadata (directories, inodes, ...)
+    Encrypted with a single key, Kfs
+  Protected by UID: secure enclave stores E_UID(Kfs).
+  Secure enclave gives E_Ke(Kfs) to OS kernel at boot time.
+    Ke is a key shared between the AES Engine and secure enclave.
+  Why bother with Kfs at all?
+    Makes it possible to erase data quickly, by deleting Kfs.
+    Or, really, deleting E_UID(Kfs).
+    Also, cannot take flash chips and connect to another phone
+      Kfs is wrapped with UID
+
+Each file's content is encrypted by a different key, Kf.
+  This key is wrapped with a Kdf, E_Kdf(Kf)
+  Store with the metadata for the file, encrypted with Kfs
+  Different Kdf's for different protection levels
+   
+Different levels of "data protection".
+  Complete: can decrypt if phone is currently unlocked.
+    Kdf is derived from passcode on unlock, discarded when locked.
+  Complete unless open: file can be written any time (but not read).
+    Special case Kdf for background downloading of attachments.
+  Until first authentication: .. if phone was unlocked since reboot.
+    Kdf is derived from passcode on first unlock, discarded on power-off.
+    Default for third-party app data
+  No protection: can decrypt any time.
+    Kdf is derived only from UID (not passcode), so available from boot.
+    But allows fast wipe, secure deletion (see below)
+  Kdfs are stored only in the secure enclave.
+
+Using wrapped file keys.
+  FS code on main CPU sees only wrapped keys.
+    Asks secure enclave to unwrap needed keys.
+    Secure enclave will unwrap, if it has DP key.
+  But OS kernel never gets the raw keys!
+    Data is encrypted/decrypted by hardware AES engine.
+    Shared secret between the AES engine and the secure enclave: Ke.
+    Secure enclave wraps the file key with the AES engine's key.
+      E_Ke(Kf)
+    Sends this wrapped key to the OS kernel.
+    OS kernel can program the AES engine as needed.
+
+How to obtain data protection keys with Touch ID or Face ID?
+  Cannot use Touch ID / Face ID immediately after reboot;
+    must first enter passcode.
+  When passcode is entered, enclave computes the Kdp keys.
+  Enclave sets aside (encrypted) copies for later use w/ * ID.
+  When user locks phone, enclave deletes Kdp.
+  But can re-obtain keys with Touch ID / Face ID.
+
+Secure data deletion.
+  Goal: allow user to quickly wipe data on the phone.
+  Goal: wipe phone after 10 failed unlock attempts.
+  Challenge: hard to delete data!
+    Takes time.
+    Flash makes copies for wear-leveling.
+  "Effaceable storage"
+    Special NAND flash direct access for secure enclave!
+    Can issue low-level NAND flash operations to delete data.
+    Used to store E_UID(Kfs).
+
+Places to look for weaknesses?
+  Kernel on main CPU sees lots of sensitive material.
+    Passcode, decrypted data, web passwords, &c.
+    But iOS kernel has had bugs that apps can exploit.
+      These give an app root / kernel privileges on main CPU.
+    Luckily you can't install new malicious apps on a locked phone.
+  Boot code may have bugs; boot a kernel that allows passcode guessing.
+  USB, WiFi, and radio s/w probably have bugs,
+    and may be active even when the phone is locked.
+  Apple's private keys must be kept safe, but must also be used to
+  sign "personalized" updates.
+    (likely that there are several/many private keys.)
+  Can UID be extracted from h/w if you have enough money?
+
+Is there a cost to this iOS security?
+  Specialized hardware costs money (enclave, fingerprint reader, AES DMA).
+  Irritating to have to type passcode.
+  Need passcode in many situations, e.g. backing up.
+  Background activities are awkward, when device is locked.
+  Forgotten passcode -> data permanently lost (unless backed up).
+
+===
+
+Several interesting ideas / techniques.
+  Secure boot: code signing, downgrade prevention.
+  Secure enclave: encrypted/authenticated communication with sensors.
+  Data protection: file keys, key wrapping, device key, effaceable storage.
+
+
+=== References
+
+Secure boot: https://queue.acm.org/detail.cfm?id=3382016
+
+Apple platform security (fall 2019): https://support.apple.com/guide/security/welcome/web
+
+Pointer Authentication Codes:
+https://lwn.net/Articles/718888/
+https://googleprojectzero.blogspot.com/2019/02/examining-pointer-authentication-on.html
+
+Similar considerations in Android: https://www.usenix.org/conference/enigma2019/presentation/mayrhofer
+
+http://blog.ptsecurity.com/2020/03/intelx86-root-of-trust-loss-of-trust.html
+
+Security flaw:
+https://arstechnica.com/information-technology/2020/10/apples-t2-security-chip-has-an-unfixable-flaw/
+Web security
+============
+
+Today's topic: isolation between sites in a web browser.
+  Overall plan is called the "same-origin policy" (SOP)
+  A case-study of real-world security policies.
+  A mixture:
+    Principles.
+    Compromises with compatibility, convenience.
+
+Why is there a problem?
+  Your browser follows instructions provided by attackers!
+  Most of us follow links to web sites we don't know much about.
+    And thus probably view malicious web sites.
+  Our browsers execute HTML, JavaScript from malicious web sites.
+  Good news: the browser doesn't let JavaScript read your local files &c.
+    I.e. the browser runs JavaScript in a sandbox.
+    So web pages can only ask the browser to do web-related things.
+  Bad news: some web-related things can be pretty damaging.
+
+What might go wrong if web browsers weren't careful?
+  (These generally don't work now, but often used to).
+  (Assume I'm viewing a malicious web site in my browser.)
+  Read my private data from web sites, e.g. e-mail?
+  Post things as me?
+  Act as me on my bank web site?
+  Look at web sites inside MIT's firewall?
+  Look at data in other browser windows?
+  Change information displayed in other browser windows?
+
+What has made securing browsers a long and complex story?
+  Initially there didn't seem to be any security problem at all!
+    Web was static text and images, nothing sensitive.
+    JavaScript was a big change.
+    Sensitive web sites (commerce, banks, e-mail, &c) was a big change.
+  Rapid evolution in uses and features:
+    Security risks often not apparent until much later.
+    Initial designs often hard to secure, and hard to change.
+    So security often retrofitted.
+  Compatibility with old web sites and old browsers is important.
+    Users care more about convenience than security.
+  Compatibility and late arrival of security ->
+    Often implemented on the side.
+    Explicit in JS and server code would have been better.
+  Lots of browsers, weak standards mechanisms.
+    Slow to get consensus about how security should work.
+  Lots of sharing between web sites, so strict isolation isn't realistic.
+    Mash-ups, APIs, advertisements, "Like" buttons, &c.
+
+Threat model / assumptions.
+  - Attacker controls a web site, attacker.com.
+  - You visit the attacker's web site.
+      e.g. attacker.com == cute-kitten-photos.com
+  - You are using the browser for other things (e-mail, bank, &c).
+  + Browser is trusted, so we can design it to contain attacks.
+  + Browser doesn't have implementation bugs (e.g., buffer overflows).
+  ? For this lecture, assume network is secure (will talk about HTTPS later).
+
+Approach: the Same Origin Policy (SOP).
+  SOP is imposed by the browser on web pages.
+  Browser labels each script (HTML, JS) with an origin.
+    Origin = the web server the page (or frame) came from.
+    protocol + host name + port
+    E.g. the origin of https://foo.com/x/y/z is https://foo.com:443
+      All pages on a given server share an origin.
+  Browser labels each resource with an origin also.
+    Resource = network server, displayed page, JS variable, &c.
+  The SOP rule:
+    A script can only access a resource if they have the same origin.
+    The script runs on behalf of some origin.
+    Unit of isolation: iframe (either top-level window/tab, or embedded iframe).
+  Two views of SOP:
+    Enforces isolation.
+    Authorizes some sharing.
+
+A simple view of the SOP
+  Web:      |  gmail.com  |  attacker.com
+                ... Internet ...
+  Browser:  |  gmail      |  attacker
+            |  windows    |  windows
+
+Example: XMLHttpRequest()
+  XMLHttpRequest(url) is a JavaScript call
+  It fetches URL and lets JavaScript see the result.
+  Often used to get at "web APIs", to fetch data for JS.
+  Could attacker.com use it to steal data from gmail?
+    No: browser enforces SOP, so it can only fetch from the
+        same server the JavaScript came from.
+
+Does the SOP do what we want?
+  It's mostly automatically imposed, no choice (has a MAC flavor).
+    So it's important that it neatly slice the boundary between
+    "always OK" and "never OK".
+  It prevents attacker.com JS from talking to gmail or my bank,
+    or MIT internal web sites.
+    i.e. with XMLHttpRequest()
+  It prevents attacker JS from looking at my other windows, or
+    changing them.
+  Attacker can probably trick me into clicking gmail.com
+    But then the browser is running HTML/JS from gmail,
+    not from the attacker.
+
+How to preserve SOP's isolation over the Internet?
+  How does page know network data is really from gmail.com?
+    And not from attacker's server?
+    Answer: TLS + certificate with DNS name
+    Will dive into these issues in lectures after spring break.
+  How does gmail.com know command is really from your browser?
+    And not from attacker's machine w/ hacked browser?
+    Answer: cookies
+
+Cookies
+  They let servers keep state in the browser.
+    For shopping cart, ad tracking, user authentication, &c.
+  Web sites can tell the browser to set cookies.
+    Set-Cookie: key=value
+  The browser sends a server's cookies back in each request.
+  Web site can specify a domain, e.g. mit.edu
+    Domain has to be a (maybe full) suffix of site's DNS name.
+    Browser sends matching cookies in all requests.
+    E.g. a cookie w/ domain=google.com matches server mail.google.com.
+  A typical setup:
+    When you log in w/ password, server sends a session ID cookie.
+    Set-Cookie: session=<sessionID> (a long hex string)
+    When server sees requests, looks up sessionID in DB to find user.
+    sessionID must be kept secret!
+      Random and long so it's hard to guess.
+  Javascript can't see cookies except as allowed by SOP.
+
+A few cookie problems.
+  It's a disaster that the browser sends them automatically.
+    Potential fix: SameSite=Strict cookies not sent with reqs from another origin.
+    Surprising behavior: clicking on link to Facebook brings up facebook login page.
+      Because Facebook cookies weren't sent, since request originated from elsewhere.
+    Workaround: SameSite=Lax cookies, sent with links from another page.
+      But now back to having a security weakness (just requires user to click on link).
+    Chrome now defaults to SameSite=Lax.
+      [[ Ref: https://www.chromium.org/updates/same-site/ ]]
+  Overwriting is a potential problem:
+    Can attacker.com change a google.com cookie?
+    So I'm logged into google.com as attacker, not me?
+    So attacker sees my search history?
+    Suffix rule helps here.
+    But can't let attacker.com set a cookie for .com!
+      Or any other top-level domain, e.g. co.uk.
+      Browser must have list of all top-level domains.
+
+Privacy concerns with cookies.
+  Different threat model: web sites collecting information about user over time.
+  Not too surprising that this works for a single site: track user accesses.
+    Challenging to prevent, without breaking the site and disabling cookies.
+    Even then, could track by IP address, other identifying features.
+    We will talk about how to address this threat model later on.
+      Lecture 21, anonymous communication.
+    The most visible attempt to solve this problem are regulatory: GDPR, etc.
+    Many "cookie consent pop-up" are defending against possible GDPR-based law suits.
+  Somewhat surprising tracking mechanism across sites: third-party cookies.
+    User visits many different sites; could these sites link the user's visits?
+    Technique: each site loads an iframe (or image or any other resource) from
+      a common site -- say, tracker.com.
+    Requests to this iframe from tracker.com get tracker.com cookies.
+      tracker.com issues a unique cookie to every user (browser).
+    Each site loads a site-specific tracker.com URL, so tracker knows the site.
+    Tracker can now piece together user's visits to all of these different sites.
+  Browser vendors are trying to implement mechanisms to stop third-party cookies.
+    Hard to figure out how to do that without breaking legitimate apps.
+    E.g., Firefox: https://developer.mozilla.org/en-US/docs/Web/Privacy/Storage_Access_Policy
+    Lots of complications, heuristics.
+      Knowing which sites are trackers or not.
+      Exceptions when user interacts with embedded iframe/object.
+
+Why is strict application of SOP not the end of the story?
+  Developers should be able to create "mash-up" sites that
+    combine content from multiple places.
+  Example: A site that combines Google Map data with real estate data.
+  Example: Advertisements.
+  Example: Social media widgets (e.g., the Facebook "like" button).
+  Also compatibility with pre-SOP HTML.
+
+SOP Exception: ordinary links.
+  E.g. an attacker.com page can contain a link to gmail.com.
+    And such a click will navigate the user to gmail.com.
+  Why this exception?
+    These links are a big part of how people find stuff on the web.
+  Usually inter-domain links are harmless.
+  BUT the browser will send cookies (if any) to gmail.com
+    So the link is followed as the gmail user.
+    This might be a problem if visiting the link has side-effects.
+
+SOP Exception: IMG
+  attacker.com page can contain <IMG SRC="https://foo.com/x.gif">
+  Browser will fetch and display the image, despite different origins.
+  Why this exception?
+    Avoid lots of copies of commonly-used images.
+    Allow easy incorporation of image content.
+  Can an attacker.com page steal content this way?
+    E.g. use IMG fetch and inspect web pages inside the MIT firewall?
+    No: browser does enforce SOP to the retrieved pixels.
+    User sees image, but not attack.com page.
+  BUT the browser might send cookies for foo.com.
+    (Assuming that foo.com doesn't have a same-site cookies policy.)
+    So foo.com may grant attacker's request my permissions.
+    This is a problem!
+
+Cross-Site Request Forgery (CSRF)
+  Suppose a page from attacker.com contains
+    <IMG SRC="https://bank.com/xfer?amount=500&to=attacker">
+  User doesn't see anything special, maybe a little broken image.
+  What if user is logged into bank.com?
+  bank.com sees a transfer request with a valid session cookie!
+  CSRF has been a big source of real attacks.
+    One underlying flaw is the exception to the SOP.
+    Another flaw is automatic sending of cookies.
+      Example of "ambient authority".
+  General term is "confused deputy".
+    Browser sends a request to bank.com.
+    Browser *should* say it's forwarding a request from attacker.com.
+    But it actually sends my cookie, implying the request
+      is on behalf of me or a bank web page.
+
+Same-site cookie policies help, but not 100%.
+  If attacker runs CSRF entirely from Javascript from their domain,
+    and same-site cookie policy is set, cookies won't be sent.
+  But if user clicks on a link, cookies will be sent.
+    "Lax" same-site cookie policy, which is the default / typically used.
+
+How to guard against CSRF?
+  bank.com sends a random token with every URL it generates.
+    E.g. https://bank.com/xfer..&token=...
+  bank.com records all the legitimate anti-CSRF tokens.
+  bank.com accepts only a request w/ a legitimate unused token
+    associated with the requesting user.
+  Hopefully the attacker can't predict or steal tokens.
+
+SOP Exception: SCRIPT
+  <SCRIPT SRC="https://foo.com/lib.js"></SCRIPT>
+  Loads and runs JavaScript from anywhere; SOP not imposed.
+  Why this exception?
+    So people can use JavaScript libraries fetched from anywhere.
+  As what origin should the fetched JS run?
+    As origin = foo.com?
+    As origin = fetching page?
+  Browsers execute with fetching page's origin.
+    Intuition: just like running library code as part of your app.
+    So you must be careful about where you fetch scripts from.
+
+SOP Exception: IFRAME
+  Loads and displays a web page in a rectangle.
+    The framed page can come from anywhere: SOP not imposed on fetch.
+  Why this exception?
+    Used for advertisements, Facebook "like" buttons, &c.
+  But SOP *is* applied to the frame's actions once fetched.
+    If main page and frame's origins are different,
+      then SOP prevents them from interacting in most ways.
+    SOP defends each against the other, making IFRAMEs fairly safe.
+    And the IFRAME gets the SOP rights of its origin, so
+      it can e.g. fetch data from its origin server.
+  The main page can, however, navigate the frame via JS.
+
+SOP Exception: Cross Origin Resource Sharing (CORS)
+  A server can tell the browser to allow cross-origin XMLHttpRequest(url).
+  If browser sees a page's request is cross-origin, it asks server
+    first, tells server requesting origin, server can say
+    yes or no.
+  Why this exception?
+    Some web API data is public.
+    Some specific mash-ups are intentionally authorized.
+  Why is the exception safe?
+    The purpose of SOP is to defend the server.
+    If the server explicitly doesn't want to be defended, that's OK.
+    Defaults to "no" if the server doesn't understand.
+  This is a nice design, since it is explicit about security.
+
+Here are a few attacks that work around the SOP.
+
+Cross-site Scripting (XSS) attack.
+  Consider sites that show users each others' comments (e.g., Facebook).
+  Attacker posts a comment like this:
+    <SCRIPT> ... </SCRIPT>
+  I view the comment.
+  If the site didn't prevent this:
+    Now attacker's JavaScript code is running in my browser.
+    Is that bad? After all the browser sandboxes JS.
+  The real problem is that attacker's code is running with
+    the origin of the surrounding page, e.g. facebook.com.
+  Attacker's JS can see my Facebook cookie with session ID!
+    Can act as me, or send my cookie to the attacker.
+  You'll see this in Lab 4.
+
+How to defend against XSS attacks?
+  HTTP-Only cookies -- hides cookie from all JS.
+    Not a complete fix, since attacker's JS can still do other things
+    as page's origin, e.g. send requests to the server as me.
+  Server could strip all HTML from comments.
+    But users like to include formatting, links, &c.
+  Server could carefully parse comments to prohibit certain tags.
+    Tricky but often done; use a good library!
+  Content-Security-Policy HTTP header, a new mechanism.
+    Server tells the browser to forbid inline scripts.
+    So the server doesn't have to guess how browser parses.
+  But what if web site allows users to upload photos?
+    Adversary could upload Javascript code as their photo.
+    Hard to get precise security guarantees with retrofitted mechanisms.
+  More elaborate versions of CSP, using nonces or hashes.
+    [ Ref: https://web.dev/strict-csp/ ]
+    Server can explicitly specify which code is OK to run.
+    Pretty effective defense.
+    Still surprising that adversary controls which code gets loaded.
+
+Clickjacking attack.
+  The browser treats user clicks as having full authority.
+  So it's vital that the user understand consequences of clicks.
+    Will it buy something on Amazon? Send e-mail? "Like"?
+  Main cues for user's understanding are visual.
+    So it's vital that page layout make click consequences clear.
+  Sadly, HTML isn't always helpful at ensuring clear visual cues.
+  Example:
+    attacker.com page includes IFRAME displaying amazon.com page.
+      With a One-Click ordering button.
+    attacker.com makes the IFRAME transparent (!)
+      <iframe style="opacity:0;" ...
+    attacker.com can paint anywhere on the page, including over IFRAME.
+      e.g. "Click here for a free iPad!"
+    A click buys the item on amazon; no free iPad.
+    amazon frame invisible, so user can't see that something odd happened.
+    Often used to increase Likes on Facebook.
+  Defense:
+    X-Frame-Options: DENY header -- prohibits page in IFRAME.
+    Content-Security-Policy: frame-ancestors 'none'
+    
+Web isolation (SOP) is used for privilege isolation by web apps
+  E.g., Facebook (https://ysamm.com/?p=763)
+  E.g., Google's googleusercontent.com
+
+Why not re-design the security model from scratch?
+  A1: Backwards compatibility! There's a huge amount of preexisting web
+      infrastructure that people rely on.
+  A2: How do we know that a new security model would be expressive enough?
+      Users won't trade much convenience for security.
+  A3: Any security model must evolve.
+
+What ideas could go into an improved design?
+  Separate user credentials from other cookies.
+    They should obey different rules.
+  Explicit indication of what principal to use.
+    No ambient authority.
+    Page should say how foreign JS should run.
+    All fetches should explicitly indicate origin
+      and user credentials to use.
+  Require less parsing, less escaping.
+    E.g. no mixing of JavaScript and HTML.
+  Explicit notion of permissions -- access control policy.
+  More visual clarity about what user is about to click on.
+    Who is showing the button? Where will it go?
+
+Is the bottom line "hopeless mess" or "tricky but adequate"?
+  The SOP does prevent a big set of attacks.
+  Browser maintainers are serious about fixing problems.
+    And they work together quite a bit for semi-standardization.
+  Frameworks like Django are helpful.
+    Libraries for tricky stuff like parsing / stripping / escaping.
+    Automatic deployment of protective mechanisms.
+    Defending buffer overflows
+==========================
+
+Topic: defenses against buffer overflows.
+  Overflows are a popular attack path, worth understanding. Even now.
+    5 high profile buffer overruns in 2019 (e.g., whatsapp):
+    https://securityboulevard.com/2019/11/5-buffer-overflow-vulnerabilities-in-popular-apps/
+    https://blog.zimperium.com/whatsapp-buffer-overflow-vulnerability-under-the-scope/
+  Example of evolution of defense/attack over time.
+    It has been very worthwhile to raise the bar,
+    even though defenses are still not perfect.
+
+Summary of the situation:
+  * Basic problem: buggy C code that writes beyond end of buffer/array.
+  * The ideal solution is to use a language that enforces bounds, e.g.
+    Python or Java. It's a huge effort to re-train programmers and
+    re-write s/w, but not impossible (e.g. Microsoft and C#).
+  * But C is used for many valuable applications and libraries, so we
+    cannot abandon it, and often can't avoid writing new C code. The C
+    definition makes it hard to impossible to precisely check bounds
+    automatically.
+  * The perfect programmer would check bounds 100% of the time, but
+    it turns out no programmers are perfect.
+  * So we need defenses that make make buffer overflows harder
+    to exploit, for big buggy C programs that we don't understand!
+
+Let's start with "classic" stack buffer overflows.
+  Attacks have two parts:
+    1) write some instructions into buffer on stack.
+    2) overwrite return PC to point to attacker's instructions.
+  Attacker's instructions can do anything the app can do.
+    Thus it's a powerful attack.
+
+Defense idea: O/S tells the hardware not to execute on the stack.
+  E.g. O/S sets Intel's NX (No eXecute) bit on each stack page.
+  This prevents execution of injected instructions on the stack.
+  Q: does NX mean we don't have to worry about buffer overflows?
+  Q: is NX a waste of time if it isn't perfect?
+
+Defense idea: stack canaries (e.g., StackGuard, gcc's Stack Smashing Protector)
+  Detects modification of return PC on stack *before* it is used by RET.
+  Compiler generates code that pushes a "canary" value on stack at
+    function entry, pops and checks value before return.
+  Canary sits between variables and return address, e.g.:       
+                         |                  |
+                         +------------------+
+        entry %esp ----> |  return address  |    ^
+                         +------------------+    |
+        new %ebp ------> |    saved %rbp    |    |
+                         +------------------+    |
+                         |     CANARY       |    | Overflow goes
+                         +------------------+    | this way.
+                         |     buf[127]     |    |
+                         |       ...        |    |
+                         |      buf[0]      |    |
+                         +------------------+
+                         |                  |
+  Q: what value should we use for the canary?
+  A: perhaps a random number, chosen at program start,
+     stored somewhere.
+
+Defense idea: address space layout randomization (ASLR).
+  Place process memory at random addresses.
+  Adversary does not know precise address of application stack, code, heap, ...
+  Requires compiler support to make all sections relocatable.
+
+Are we done yet?
+  What kinds of attacks might work despite ASLR?
+  What kinds of attacks might work despite stack canaries?
+  * maybe attacker can write or read the secret random canary value somehow.
+  * overwrite function pointer on stack before canary.
+  * overwrite some other crucial variable on the stack, e.g.
+    bool ok = ...;
+    char buf[128];
+    gets(buf);
+    if(ok){
+      ...
+    }
+  * overflow of one global variable into the next (much like on stack).
+  * overflow of heap-allocated buffer.
+
+Are overflows of heap-allocated buffers exploitable?
+  Important b/c modern code tends to use heap a lot.
+  foo(){
+    char *p = malloc(16);
+    gets(p);
+  }
+  Can attacker predict what is after p in memory?
+    [diagram of free/used malloc blocks]
+
+It turns out there are some pretty powerful heap attacks!
+  Here's a simplified version of a real attack.
+  Some malloc()s lay out blocks of free/used memory like this in
+  doubly-linked list:
+  
+            ^
+	    |   data
+	    |-- next
+		prev --|
+	    |-> ----   |
+	    |   data   |
+	    |-- next   |
+		prev --|-|
+	    |-> ---- <-| |
+	    |   data     |
+	    |-- next     |
+		prev <---     
+
+
+  Malloc keeps free blocks on a doubly-linked list.
+    In address order, so it can merge small adjacent blocks into large one.
+  When a free block is allocated, here's part of what malloc() does:
+    b = choose a free block
+    b->next->prev = b->prev;
+    b->prev->next = b->next;
+  If the attacker overflows a malloc()ed block, the attacker can
+    modify the next and prev pointers in the next block.
+  So: suppose attacker writes x y to start of next block.
+    Call next block b, then b->prev = x, b->next = y.
+    Suppose b free and happens to be chosen by next malloc():
+    malloc() will effectively execute
+      *y = x
+    Thus writing an attacker-chosen value to any memory location!
+  If attacker can guess address of saved return PC,
+    and can guess address of the buffer being overflowed,
+    can load instructions into the buffer and cause
+    PC to point to injected instructions.
+  Similarly for *any* function pointer with predictable address.
+  Q: how could the attacker predict such addresses?
+  Real attacks have to be more complex; search the web for
+    Smashing the Heap for Fun and Profit, or Vudo Malloc Tricks.
+
+Note the pieces the attacker must assemble:
+  * Find a buffer overflow bug in the application or library.
+  * Find a way to get the program to execute the buggy code
+    in a way that causes attacker's bytes to overflow the buffer.
+  * Understand malloc() implementation.
+  * Find a code pointer and guess its address.
+  * Guess the address of the buffer, i.e. attacker's injected instructions.
+
+These attacks require attacker effort and skill.
+  Attacker must understand corner cases in app logic, malloc(), compiler output.
+  Bad news for defender: few application programmers think about corner cases.
+  Good news for defender: multiple fragile pieces in attacker's puzzle.
+
+A high-level point: if there's a buffer overflow bug, a clever enough
+  attacker can probably exploit it. More generally, many bugs that
+  look harmless can be turned to an attacker's advantage, perhaps in
+  combination with other flaws.
+
+Luckily, as the paper shows, one can retrofit automatic array bounds
+checking to existing C programs!
+  If we're willing to modify the compiler, recompile applications,
+  and perhaps modify the applications.
+
+Bounds checking approach #1: Fat pointers
+  Straightforward though not very practical.
+  Each pointer contains start and end of original memory object,
+    as well as current pointer value:
+    +--------------+------------+-------------+
+    | 32-bit start | 32-bit end | 32-bit curr |
+    +--------------+------------+-------------+
+  Modify compiler to generate code that:
+    * Sets p.start and p.end in malloc() and p = &x.
+    * During dereference, check start <= curr < end,
+      panic if outside.
+    * During pointer assignment, copy entire fat pointer.
+  Thus:
+    p = malloc(4);  // malloc fills in start and end.
+    *p = 1;         // start <= curr < end, so check succeeds.
+    q = p;          // copy fat ptr to q.
+    q = q + 8;      // add 8 to q.curr.
+    *q = 1;         // check fails, since curr >= end.
+    But:
+      q = q - 6;    
+      *q = 1;       // check succeeds.
+    Start/end arrangement remembers what the original object was.
+    Lots of C code requires this, e.g. pointer to one past end.
+ Problem #1: Checks may be expensive.
+ Problem #2: Not very compatible.
+   You can't pass a fat pointer to an unmodified library.
+   Changes size of data structures.
+   Updates to fat pointers are not atomic, because they span
+     multiple words. Applications with threads and async
+     interrupts/signals may fail due to these non-atomic updates.
+
+Bounds checking approach #2: Keep bounds information in a separate table.
+  So that we don't have to change pointer representation.
+  Baggy Bounds (and others) do this.
+
+  Basic idea: For each allocated object, store start and size of object.
+    malloc() or compiler-generated code maintains the table.
+    e.g. table[p] = ???
+  Set an OOB (Out Of Bounds) bit in the pointer if it leaves its original object.
+  For each pointer, compiler generates code for two kinds of operations
+    (Compiler "interposes" on them)
+    Pointer arithmetic: char *q = p + 256;
+      Must detect if pointer no longer points into original object, and set OOB bit.
+      compare q to table[p]
+    Pointer dereferencing: char ch = *q;
+      Must panic if q's OOB bit is set.
+
+  Challenge: need to index table[] with both p and e.g. p + 10,
+    i.e. if p points to middle of object rather than start.
+
+  Challenge: if arithmetic modifies p to point to a different object,
+    we have to know to NOT look at table[p] on future uses of p.
+    can use OOB bit in pointer for this.
+
+  Challenge: if arithmetic modifies p to return back to its original
+    object, we must detect that and clear OOB, since pointer is now
+    valid again. in particular, how to know what original object was?
+
+  Challenge: prevent table from being huge, or expensive to access.
+
+Why track OOB?  Because it can happen in legal C programs; for example:
+  size_t array_size = ...;
+  int *arr = malloc(array_size * sizeof(*arr));
+  int *end = arr + array_size; // end is an out-of-bounds pointer. if dereferenced, baggy will throw an error
+
+  for (int *i = end - 1; i >= arr; i--) {
+    // loop backwards over array
+  }
+
+Baggy Bounds uses power-of-two trick to optimize the bounds table:
+  Table entry holds just size, as log base 2, to fit in a byte: smaller table.
+    2^table[i] yields size, so e.g. 20 means 1 megabyte.
+  Allocate only power-of-two sizes on power-of-two boundaries.
+    Compiled code can compute start of an object from pointer and table[] entry.
+    Just clear low log2(size) bits.
+  Optimization: each table entry covers slot_size=16 bytes, so table isn't huge.
+    64-byte object at address x uses 4 table entries starting at table[x/16].
+
+Baggy Bounds uses virtual memory trick to handle out-of-bounds pointers:
+  Set most significant bit in an OOB pointer.
+    Mark pages in the upper half of the address space as inaccessible.
+    Compiler doesn't have to insert checking instructions for dereferences!
+  OOB mark means "ptr is within slot_size/2 of original object".
+    Arithmetic code can reconstruct what the original object was.
+    Clear OOB if ptr moves back to original object.
+    Panic if arithmetic tries to move OOB more than slot_size/2 away.
+
+Given object p, here's how to find size and start of the object
+  p points into, for slot_size=16:
+  size = 1 << table[p >> 4]; // 4 is the number of bits in 16.
+  start = p & ~(size - 1);   // clears the low log2(size) bits.
+
+Example:
+  p = malloc(25); // rounds up to 32, sets two table[] entries.
+  q = p + 10;     // arithmetic; reads table[], sees OK.
+  r = p + 35;     // arithmetic; not OK; sets OOB.
+  *r = 1;         // VM system forces crash.
+  s = p + 35;     // sets OOB.
+  s = s - 20;     // arithmetic clears OOB.
+  *s = 1;         // OK
+  t = p + 100;    // arithmetic forces crash: not within slot_size/2.
+
+What's the answer to the homework problem?
+  char *p = malloc(256);
+  char *q = p + 256;
+  char ch = *q;  //Does this raise an exception?
+
+So:
+  Baggy Bounds can be applied to big existing buggy C programs,
+  and automatically stops the program if an attacker tries to
+  exploit a buffer overflow. This is a big win!
+
+Can Baggy Bounds ever panic when the code is actually legal?
+  Consider C code that casts pointers to integers, and then compares them.
+  May break due to the OOB bit.
+
+What overflow bugs might Baggy Bounds not catch (Section 7)?
+  Overflow of array inside a larger malloc()'d struct.
+  Cast pointer to int, modify, cast back to pointer.
+  Application might implement its own allocator.
+  Dangling pointers to re-allocated memory (use-after-free).
+
+Baggy Bounds, and overflows in general, illustrate a general pattern:
+  Defenders habitually make a specific kind of error.
+  Attackers find a way to exploit that error.
+  Defenders build a tool to spot/fix the error.
+
+Reference
+  Blindly attack a network server
+    https://css.csail.mit.edu/6.858/2014/readings/brop.pdf
+  Vudo Malloc Tricks
+    http://phrack.org/issues/57/8.html
+  Smashing the heap for fun and profit
+    http://doc.bughunter.net/buffer-overflow/heap-corruption.html
+  Much research in follow-on schemes: e.g.,
+    https://www.comp.nus.edu.sg/~gregory/papers/cc16lowfatptrs.pdf
+6.858 Lecture Bugs and Symbolic Execution
+
+today's topics: finding bugs, symbolic execution, EXE
+  can we automate the search for security vulnerabilities?
+  basically the same as finding bugs; let's borrow bug-finding ideas
+  symbolic execution
+    powerful method of finding "deep" bugs
+    you'll use it in lab 3
+
+bugs: major source of security exploits
+  bugs ~ exploit
+    maybe hard, but should assume it is possible
+    e.g., not buffer overrun is an exploit, but it maybe possible to exploit
+  encourage researchers/security practitioners/enthusiasts to find exploits
+  protocol for disclosing exploits
+    contact vendor
+    after some time disclose bug to the public (e.g., 90 days)
+    Example policy (https://insights.dice.com/2020/01/15/google-project-zero-bug-disclosure-etiquette/)
+    CVE: community effort to record bugs (https://cve.mitre.org/)
+      CVE = Common Vulnerabilities and Exposures
+  many companies have bounty programs
+
+today's paper: a novel approach to finding bugs in applications
+  application has inputs, which the attacker can provide (e.g. web requests)
+  we add checks (e.g. assertions) for bad situations that might arise
+    the checks could be too expensive to use in the real system
+  paper provides method to find inputs the attacker could provide
+    that would cause the code to fail the checks
+  can the attacker use this too?
+    yes!
+  
+what kinds of bugs?
+  divide by zero, null-pointer dereference, out-of-bounds array access
+  application-specific bugs (through asserts)
+    bank transaction changed sum of all accounts
+    X's transaction decreased Y's balance
+    program opened a file with name determined by input
+    request sets cookie to impersonate another user
+  application-specific asserts in programs often turned off during deployment
+    they are sometimes expensive
+    we rely on testing with asserts turned on
+
+why not directly prove that the program is correct?
+  this can be done 
+  but it's a lot of work
+  not yet practical for big programs
+  someday
+
+you could write a suite of tests (and you should)
+  each test runs the program with some input
+    the test knows the expected output
+    the asserts in the code get a chance to catch errors
+  pro: good for intended functionality
+  pro: good for bugs that are already known
+  con: not so good for unintended functionality == vulnerabilities
+  con: not so good for as-yet-unknown bugs
+  con: hard to write tests that get complete "coverage"
+       == cause every line of code to execute
+       if no test causes some line of code to execute,
+         you can't spot bugs in it
+  con: takes effort to write tests
+
+can we automate test-case generation?
+can we automate search for as-yet-unknown bugs?
+can we automate generation of tests that achieve good coverage?
+
+fuzzers
+  idea: execute program on lots of randomly-generated inputs
+  1. find input sources
+     command-line arguments
+     HTTP requests
+  2. write input generation code
+     completely random inputs unlikely to get very "deep"
+       if method == "GET" ...
+     usually need smart input generator:
+       generate syntactically correct input
+       with random content where freedom is allowed
+       GET /xxx
+       GET /transfer?from=xxx&to=yyy&amount=zzz
+     use test suite to help generate inputs
+  3. execute with random inputs until you get bored
+     maybe some random inputs will trigger an assert that
+       you didn't think an attacker could violate
+     e.g. maybe bank code doesn't check that "from" account
+          has enough balance to cover a transfer;
+          fuzzing may discover relevant arguments, triggering
+          an assert that checks for negative balances or
+          conservation of balances.
+
+demo:
+  cd fuzz
+  cat simple_test.go
+  go test -fuzz .
+  fix bug (return if divide by zero)
+  go test -fuzz .
+  fix bug (return if OOB)
+  go test -fuzz .
+
+do fuzzers work?
+  they are widely used and have found lots of bugs
+    particularly good at bugs like buffer overflow that
+    may not need a specific input value to trigger them
+    many out-of-bound values are likely to generate crash
+    don't even have to write assert
+  advantage: better than programmer at testing for unexpected behavior
+  advantage: no need to control entire execution env
+    can fuzz black-box systems over the network
+    as long as there's a way to detect errors
+  advantage: may not need source code
+  disadvantage: uses lots of CPU time
+  disadvantage: hard to cover everything
+    can miss bugs because didn't happen to try a particular input
+      e.g. if command == "credit"
+    or if inputs must have complex structure
+      e.g. hard to test a compiler with purely random input
+
+symbolic execution: a more sophisticated testing scheme e.g. EXE
+  goal: find interesting/deep bugs
+     drive program along all paths in program
+  ideas:
+    compute on symbolic values (instead of concrete values)
+    branch on each if statement
+       create a path condition for the if branch and one for the else branch
+    use constraint solver to see if branch is possible
+
+overview of EXE
+
+  At compile time:
+  
+  C input --->  [C-to-C translator] --> instrumented if, assignments, expressions
+                                                    +
+				        table: memory range -> symbolic value
+						    
+  At runtime
+
+->  [ application process ] -------> path condition ----> [constraint solver (STP)]
+|     at if statement,
+|     construct path condition                        is this path condition satisfiable?
+|     for each branch
+|                      <--------- YES/NO/DON'T KNOW (timeout) ---
+|		      
+|           |
+|	    |
+|   If unsatisfiable, don't explore branch  
+|   If satisfiable, then fork to explore branch
+|           |
+|  	    |
+|	    V
+|--- [ scheduler process ]
+    selects which application process to explore
+       
+
+example:
+1. read x, y
+2. if x > y:
+3.   x = y
+4. if x < y:
+5.   x = x + 1
+6. if x + y == 7
+7.   error()
+
+line 6+7 is the expansion of assert x + y != 7
+
+this is a simple example of code that's hard for humans or fuzzers to test
+  i.e. to decide if attacker could trigger the error
+  requires some careful thought by human
+  requires a lot of luck in a random fuzzer
+
+EXE executes with symbolic values
+  i.e. variable/memory holds an *expression* in terms of inputs
+  x and y hold the example's inputs
+    they hold symbolic values -- not concrete values
+    let's say x=alpha and y=beta
+  EXE remembers which memory locations hold symbolic values
+    and what each location's current symbolic value is
+  EXE remembers "constraints" imposed by executed if statements
+    the "path constraints" (pc)
+  EXE views execution as a tree, which splits at each if
+  EXE executes down one side of each if, then down the other
+    the "if" adds the condition to one execution's pc, and "not" to the other
+  when EXE gets to the error() call,
+    it checks whether the current path constraints can be satisfied
+    EXE uses the STP constraint solver
+    if yes, STP indicates the satisfying values of input variables
+    if attacker inputs those values, program will call error()
+
+one path:
+1. pc = { }, x = a, y = b (alpha, beta)
+2. pc = { a > b }, x = a, y = b (fork)
+3. pc = { a > b }, x = b, y = b
+4. same (no fork)
+6. cannot satisfy b + b == 7
+   skips if, continues executing
+
+Demo:
+  python
+  import z3
+  a = z3.BitVec('a', 8)
+  b = z3.BitVec('b', 8)
+  z3.solve(a>b)
+  z3.solve(a>b, b<b)
+  z3.solve(a>b, b+b==7)
+
+another path:
+2. pc = { a <= b }, x = a, y = b
+4. pc = { a <= b AND a < b }, x = a, y = b
+5. pc = { a <= b AND a < b }, x = a + 1, y = b
+6. (a + 1 + b) == 7 for a < b?
+   lots of solutions e.g. a=0 b=6
+   EXE would report an assert failure w/ inputs e.g. a=0 b=6
+
+Demo:
+  z3.solve(z3.Not(a>b))
+  z3.solve(z3.Not(a>b), a<b)
+  z3.solve(z3.Not(a>b), a<b, a+1+b==7)
+
+  or
+  z3.solve(z3.Not(z3.UGT(a, b)), z3.ULT(a, b), a+1+b==7)
+
+symbolic execution is very powerful
+  it looks at the program to figure out bug-provoking inputs!
+  it understands what "x + y == 7" implies about the input
+
+EXE is a C-to-C translator -- it transforms C code, then compiles w/ gcc
+  can handle all of C except floating point
+  state:
+    table indicating which memory ranges are symbolic
+    value for symbolic range is
+      a symbolic array of bytes
+      each byte is 8 symbolic bits
+      one representation independent of C type
+    path constraint
+  1. EXE adds code to every assignment, expression, and branch
+     if any argument symbolic, mark result symbolic, record sym value
+     if all arguments concrete, execute faster ordinary operation
+  2. fork() at each branch
+     add if-condition constraint (or "not") to pc in each process
+
+KLEE is a more recent version of EXE from the same researchers
+  works on LLVM bitcode rather than C source code
+  https://klee.github.io/
+
+demo:
+  cd klee
+  make
+  klee simple.bc
+  ktest-tool klee-last/test000003.ktest
+  KTEST_FILE=klee-last/test000003.ktest ./simple-run-test
+
+Figure 9 has a fragment of a real example
+  packet filter
+    this is what tcpdump and many other network monitoring apps use
+    user (attacker) supplies an interpreted filter in a simple language
+    kernel interprets filter to decide whether user wants to see each packet
+    we're worried about evil user supplying filter that tricks the kernel
+  Figure 9 is called when filter wants to read "len" bytes at "offset"
+    there is code to check that filter isn't reading beyond the end of the packet
+    what is the problem?
+    how does EXE spot it?
+
+EXE generates a tree of processes corresponding to execution tree
+  by fork()ing at each "if"
+
+Q: how big will execution trees grow? is it a problem?
+
+Q: can we merge all tree nodes that refer to same if?
+   i.e. does one symbolic execution represent all possible executions
+     of that line?
+
+Q: how long might it take EXE to run?
+
+how does EXE handle all those fork()ed processes?
+  each contacts "search server" and waits
+  which process should search server allow to run?
+  depth-first search?
+    pro: executes deep into program
+    con: can get stuck in loops with symbolic bounds
+         thus may never execute many lines of code
+  breadth-first search?
+    pro: doesn't get stuck, since tries many paths a little bit
+    con: may never get very far into the program
+  EXE search server uses "best-first" heuristic:
+    line of code that's been run the fewest times (much like breadth-first)
+    use DFS on that process and children "for a while"
+
+The Question
+  Each time EXE adds a branch constraint it queries STP to check that
+  there exists at least one solution for the current path's constraints.
+  What would go wrong if EXE did not use STP, and instead tried all
+  branches? What would go wrong if EXE randomly selected a branch to
+  check? (i.e. followed just one, not both)
+
+how does a constraint solver work?
+  this is the really hard part of symbolic execution
+  constraint solver solves sets of equations [demo Z3]
+  easy: x + y = 10 AND x = y
+  hard: 900 = x*x -- requires a trick -- STP knows many tricks
+  too hard: 10 = sha1(x) -- will time out
+
+arrays can be tough for a constraint solver
+  EXE turns many C constructs into arrays (strings, ptrs, structs?)
+  s[c] -- concrete index lets STP treat s[c] as a specific symbolic value
+    this is the easiest case -- and the most common
+    e.g. looping over an input string
+  c[s] -- could refer to any element, since s is symbolic
+    equivalent to a big disjunction (c[0] or c[1] or ...)
+  *p -- if p is symbolic, which array? i.e. which disjunction?
+
+what if the constraint solver times out?
+  effectively treat it as "unsatisfiable"
+  if solving at termination (e.g. error()) -- unsat means print nothing
+  if solving at division/dereference -- unsat means assume there's no error
+  if solving at some "if" branch -- unsat means prune
+
+very slow, so optimizations are critical
+  ordinary concrete operations/operands when possible
+  don't bother with if-branch if no solution
+  cache+share constraint solutions (4.1)
+  solve and cache independent constraint fragments (4.2)
+  solver knows a lot about arrays (3.3)
+
+are there situations that EXE can't handle?
+  no floating point
+  no interaction with O/S e.g. open(symbolic-file-name)
+
+if EXE finds no bugs -- does that mean there are no bugs?
+  no: EXE doesn't know what a bug is
+    it finds crashes + asserts, but no other problems
+  no: STP might run out of time before finding a solution
+    i.e. some input could cause assert to fail, but STP can't find it
+  no: EXE may not explore all paths
+    there may be a vast # of paths, programmer may give up before
+      EXE tries them all
+
+Evaluation
+  does EXE find real bugs?
+  how fast?
+
+EXE finds real bugs in smallish UNIX utility code
+  packet filter vs evil filters
+  udhcpd vs evil packets
+  pcre (perl compatible regular expressions) vs evil regular expressions
+  kernel file system vs corrupt file system disk images
+  impressive -- real C programs, real bugs!
+
+mostly buffer overflow / illegal memory references
+  these are errors EXE can find w/o programmer help
+  would take more programmer help to find application-specific bugs
+    e.g. missing permission checks
+
+how fast?
+  Table 2 gives run-time for above programs (bpf, udhcpd, pcre)
+  tens of minutes -- not so bad
+  but complexity might be exponential in program size...
+
+Lab 3 uses "concolic execution", a variant of symbolic execution
+  problem: what if there are functions that you can't look inside?
+  as when layering symbolic execution on top of a complex language
+    for Lab 3, adding symb exe to Python w/o modifying Python
+  example:
+    read x, u
+    ok = DBlookup(u)
+    if x == "GET":
+      if ok == True:
+        ...
+      else
+        ...
+  if we don't have a symbolic DB, we cannot execute this symbolically
+
+concolic execution
+  execute with concrete inputs -- e.g. empty string
+    so we can execute the DBlookup in the example
+    it's an ordinary concrete (non-symbolic) execution
+  while executing:
+    record symbolic values of variables derived from inputs
+      when possible
+    maintain path constraint of executed path
+      just one path, since concrete inputs only explore one side of each "if"
+  after execution finishes:
+    negate an "if" condition in the pc
+    solve modified pc (up to that "if"), yielding new concrete inputs
+    re-execute on new concrete inputs
+    new execution will follow a different path than first
+  keep re-executing with different "if" conditions negated
+    eventually can drive execution down lots of different paths
+    and perhaps find inputs that trigger assertion failures
+
+concolic pro/con
+  pro: much easier to add to a language like Python
+       "proxy" concolic data types replace int, string
+  pro: an easy way to tolerate opaque functions
+  con: will miss some constraints, e.g. relation of ok to u
+       thus may not be able to execute down some "if" branches
+
+conclusion
+  symbolic execution is powerful and productive
+  but not so practical as programs grow large
+  it's a promising research area as well as a useful tool
+    research tools: S2E (symbolic execution for qemu)
+    used in practice at bug-finding companies (e.g., GrammaTech)
+    used at Microsoft internally (e.g., SAGE)
+
+references
+https://cacm.acm.org/magazines/2013/2/160161-symbolic-execution-for-software-testing/abstract
+https://unsat.cs.washington.edu/projects/serval/
+
+Verification for security
+=========================
+
+Why are we discussing this paper?
+  Formal verification can eliminate bugs (prove a strong security guarantee).
+  Big deal for security: many vulnerabilities are due to bugs/mistakes.
+  This paper's artifact is widely used (e.g., in Firefox).
+  Formal proof gives meaningful security guarantees.
+
+What is formal verification?
+  Goal: ensure there are no bugs.
+  What does this even mean, and how to get there?
+  From last lecture:
+    Need to know when a bug occurs (or what is an incorrect execution).
+    Need to consider all possible executions and check that there's no bugs.
+  Both parts (definition and checking) seem tricky.
+
+One correctness definition: compiler and/or developer puts in lots of assertions.
+  This is what EXE from last lecture used as its correctness goal.
+  Assertions indicate bugs, but is is enough to avoid assertions?
+  Typically, want to prove some strong property about correctness or security.
+  Even if program doesn't crash, want the end result to be right.
+  This is typically called a specification (spec for short).
+    Example: sort() produces a permutation of input in sorted order.
+    Example: checkpw() returns OK if password is correct for the user logging in.
+  Contrast with bug-finding: focus on overall correctness rather than the bug.
+    Doesn't matter what the bug is: our goal isn't to pin-point the bug.
+    No need to flag bug early like in EXE.
+      We will need to reason about execution all the way to the end.
+    If we prove correctness, the end result is correct for all runs.
+      Doesn't matter if some code looks buggy.
+      We know it's correct the way it's used to achieve the spec!
+
+Cryptographic code has lots of subtle bugs that aren't about memory safety.
+  [ Ref: https://github.com/mit-plv/fiat-crypto/blob/master/crypto-defects.md ]
+  Many public-key crypto implementations operate on big numbers (>> 64 bits).
+  Common technique: multiple limbs represent a bignum.
+    Naive plan: 64-bit limbs, bignum is limb0 + 2^64*limb1 + 2^128*limb2 + ...
+  Operations on bignums require handling carry between limbs.
+    With our naive plan, every addition (or other op) propagates carry bits.
+  Problem 1 with carry: control flow timing channel.
+    If we just use an if statement, code will run slower when there's carry.
+    Adversary could learn information about signing keys, etc.
+    Better plan: compute carry bit and add it, regardless of whether it's 1 or 0.
+  Problem 2 with carry: performance.
+    Doing carry propagation takes time.
+    Clever optimization: use a smaller limb weight than 2^64 (e.g., 2^51).
+    Then, can postpone carry propagation for a while (until it gets to 2^64).
+    Widely used trick in crypto library implementations.
+  Similarly, bignums are usually modulo some large prime.
+    Requires periodic "modular reductions".
+    But again, modular reductions are expensive, want to defer when possible.
+  Challenge: need to track when carry propagation / mod reduction is necessary.
+    Limb values grow depending on how many ops, and which ops, are executed.
+    Not doing the carry propagation / modular reduction risks incorrect result.
+    Real bugs due to this problem, could lead to key disclosures, etc.
+
+Formal verification components.
+  Implementation: code the developer cares about.
+  Spec: precise description of what it means for the code to be correct.
+    Can think of this as an extreme version of "bug definition" from EXE.
+    Actually expressed quite differently from EXE's panic/crash plan.
+  Verifier: tool that checks if implementation meets spec.
+    Like a sophisticated compiler / type-checker.
+    Often uses an SMT solver internally, same as we saw in EXE.
+    F* in the HACL* project.
+  Proof: developer-written hints to the verifier to make it say "OK".
+  If verifier says OK, can compile and use implementation code.
+
+What's trusted in verification?
+  Spec has to be correct / capture desired properties.
+  Implementation is not trusted.
+    In principle, could be supplied by an adversarial developer!
+    That requires the spec to capture everything you might care about.
+    Often not quite true: performance, liveness, etc.
+  Verifier is trusted to be correct.
+    Similar to how we trust compiler, etc.
+    Could be the case that a bug in the verifier means the proof isn't right.
+    Often not a big problem because implementation code isn't adversarial.
+      Well-meaning developer wants to use verification to ensure correctness.
+  Some verifiers have a clever design with a small trusted component.
+    E.g., Coq is large but has a small proof-checking kernel.
+    Only proof-checking kernel has to be correct to know a proof is valid.
+    Rest of proof checker is responsible for generating proof for kernel.
+    But bugs in the rest of the proof checker can't cause a bad proof to validate.
+  
+Verification approach: program logic.
+  Hoare logic, named after Tony Hoare.
+    Different way of considering possible execution paths, than what EXE did.
+  Basic idea: pre- and post-conditions.
+    Precondition describes what has to be true before a piece of code runs.
+    Postcondition describes what will be true afterwards.
+  Typically written as {P} code {Q}.
+    P is the precondition.
+    Q is the postcondition.
+  Demo: triple from fstar/Hoare.fst
+    Pre- and post-condition for triple.
+    Breaking impl causes fstar to error out.
+  How to verify code in Hoare logic?
+    Sequence rule.
+    Suppose we want to prove {P} foo; bar {Q}.
+    First prove {P} foo {V}.
+    Then prove {V} bar {Q}.
+    E.g., F* knows the specs for <<^ and +%^ operators.
+  Demo: times9 from fstar/Hoare.fst
+    Can verify times9 without looking inside triple, just using its spec.
+
+Specs ensure memory safety.
+  Any spec (e.g., triple or times9 from fstar/Hoare.fst) ensures memory safety.
+  If we had a memory safety violation, couldn't prove anything.
+    Buffer overflow leads to undefined behavior, cannot predict outcome.
+  But specification for times9 is much stronger than just "no crashes".
+    Promises correct result.
+
+Executable code: generating from F*.
+  Demo so far has been writing code in F*.
+    Higher-order, dependent types, etc.
+  Paper's plan: translate a subset of F* code into C.
+    Tool called Karamel.
+    Low* is a subset of F*.
+    For code in Low*, Karamel can take F* and output corresponding C.
+  Demo: fstar/Hello.fst
+    Spec proves memory safety, plus something about return value.
+    Corrupting the code (e.g., writing past end of b) causes fstar error.
+    Extracts to Hello.c, Hello.h
+    Can run this from main.c
+
+Writing more sophisticated specifications.
+  Big idea: abstraction function.
+    Takes code-level state and translates into an abstract version.
+    Abstract state doesn't have to be efficient or executable.
+    Hopefully it's helpful to describe the desired spec, though.
+  Example: fsum (page 1792).
+    Abstraction function eval: takes bignum limbs, returns big integer.
+    Spec: function returns the sum of bignums.
+    More complex at the code level, but spec is succinct.
+  Abstraction functions help keep specs short.
+    Also helps caller reason about what function does, in abstract terms.
+
+Reasoning about memory.
+  Need to state what's true about pointers.
+  Pointers refer to a specific state of memory.
+  Pre- and post-conditions refer to the heap before and after function runs.
+    B.live heap ptr
+    ptr is a special value ("buffer") in F* that tracks both pointer and length.
+    Only the base pointer is extracted via Low* to C.
+    But in F*, can reason about the buffer's logical length.
+  Demo: fstar/Bignum.fst
+    Simple kind of bignum, two 64-bit limbs.
+    Abstraction function: eval (does not get extracted to C code).
+    fadd: requires that a and b are valid pointers, in starting heap h0.
+    Postcondition ensures r is a valid pointer in final heap h1,
+      and abstract value of r is the sum of abstract values of a and b.
+    Extra precondition to avoid overflow: a, b < 2^63.
+    Generates plausible code (Bignum.c).
+  Again, proof ensures memory safety, plus spec's requirements.
+
+Side channels.
+  Many possible side channels, hard to enumerate every leakage.
+  Paper focuses on timing channels.
+    Excludes physical channels like power analysis, RF, etc.
+  Two main channels:
+    Execution timing differences when operating on secret values.
+    Cache contents affected by secret values.
+  Common discipline: secret independence.
+    Do not branch on secret values (could lead to timing differences).
+    Do not divide by secret values (could lead to timing differences).
+    Do not use secret values as addresses (could lead to cache diffs).
+  How to do useful work when following secret-independence?
+    Can compute: add, mul, copy values around, etc.
+    eq_mask (page 1793): return 0x00000000 or 0xffffffff if equal or not.
+    Can then mask with the result of eq_mask, constant time.
+    Similar ops used to compute and propagate carry bits without branches.
+  F* plan: special type for secret values.
+    E.g., uint32_s.
+    Works like uint32 but cannot branch, divide, use for pointer arith, etc.
+  Nice example of F*'s dependent types: eq_mask spec from page 1793.
+    Result type says z is a uint32_s whose value is either all-0 or all-1.
+
+What is HACL* proving?
+  Memory safety: as a side effect of F* proofs.
+  Functional correctness: postconditions.
+  Side channels: secret-independence enforced by types.
+  No cryptographic security: different kind of proof!
+    Requires reasoning about probabilities, computational limits, hardness.
+
+How do we know the spec is right (no bugs in the spec)?
+  Page 1792 top left.
+  Audit.
+  Execute the eval function using OCaml.
+  Prove something on top of the spec.
+  Prove equivalence of multiple specs.
+
+How much effort is required?
+  Table 1, page 1800.
+  Substantial C code (7225 lines).
+  Small specs (about 1/10x the size of the code).
+  Moderate proof effort (22926 lines of proof, about 3x code size).
+
+What's the performance?
+  Table 2, page 1801.
+  Comparable to / slightly faster than other C implementations.
+  Slower than manual assembly implementations.
+  Later work (fiat-crypto) showed it's possible to generate fast verified asm.
+
+Summary.
+  Verification is a powerful technique for ensuring correctness.
+  Need a clear and correct specification.
+  Big win for tricky and critical code, like crypto.
+  Ongoing research on formal verification in other areas (security, reliability, etc).
+
+===
+
+Notes on running hacl-star on Arch Linux:
+
+  pacman -S dotnet-runtime-6.0
+
+  opam switch 4.14.1
+  opam pin add fstar --dev-repo
+  opam pin add karamel --dev-repo
+
+  wget https://github.com/Z3Prover/z3/releases/download/Z3-4.8.5/z3-4.8.5-x64-debian-8.11.zip
+  unzip z3-4.8.5-x64-debian-8.11.zip
+  cp z3-4.8.5-x64-debian-8.11/bin/z3 ~/bin/z3-4.8.5
+
+  git clone https://github.com/hacl-star/hacl-star
+  cd hacl-star
+  export HACL_HOME=$(pwd)
+  ./tools/get_vale.sh
+  export VALE_HOME=$(cd ../vale && pwd)
+  export KRML_HOME=$HOME/.opam/4.14.1/.opam-switch/build/karamel.1.0.0
+  make -j
+
+Fstar demo notes:
+
+  https://fstarlang.github.io/lowstar/html/Introduction.html
+  cd fstar
+  make
+  ./demo
+  cat Bignum.fst
+  cat Bignum.c
+  cat Bignum.h
