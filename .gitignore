@@ -1,6 +1,9 @@
 # ignore all pdf files
 *.pdf
 
+# ignore all input files (for cp)
+input
+
 # ignore all template files except the base
 template.typ
 !/template.typ
