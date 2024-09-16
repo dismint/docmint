@@ -1,7 +1,8 @@
-// IMPORTS
-#import "@preview/diagraph:0.2.1": *
+// | 🙑  dismint
+// | YW5uaWUgPDM=
 
-// FUNCTIONS
+// FUNCTIONS //
+
 #let colorbox(
   title: "Title",
   color: "95b8d1",
@@ -76,20 +77,22 @@
 
 #let bimg(
   path,
-  width: 100%
+  width: 10%
 ) = {
-  rect(image(path, width: width), stroke: 0.5em, radius: 0.2em)
+  rect(image(path, width: width), stroke: 0.1em, radius: 0.2em)
 }
 
-// template
+// TEMPLATE //
+
 #let template(
   title:    "Notes",
   subtitle: "Class",
-  dark:     false,
   pset:     false,
+  toc:      true,
   body
 ) = {
-  // SHOWS
+  // SHOWS //
+  
   // code block
   let fsize = 0.9em
   show raw.where(block: true): it => { set par(justify: false); grid(
@@ -106,17 +109,22 @@
     par(
     block(radius: 1em, fill: luma(246), width: 100%, inset: 1em, text(size: fsize)[#it])),
   )}
+
+  show raw.where(block: false): it => {
+    box(fill: rgb("#EEEEEE"), outset: (y: 0.3em, x: 0.1em), radius: 0.2em, it)
+  }
+  
   // links
   show link: underline
 
-  // SETS
+  // SETS //
+
   set page(
     paper: "a4",
     margin: (
       x: if pset { 10% } else { 7% },
       y: if pset { 10% } else { 5% },
     ),
-    fill: if dark { rgb("0c0c0c") } else {},
     numbering: "1 / 1",
   ) 
   // only set the header on the second page onward
@@ -124,7 +132,7 @@
     if counter(page).at(loc).first() > 1 and pset [
       *#title*
       #h(1fr)
-      Justin Choi
+      Annie Wang
       #box(line(length: 100%, stroke: 0.1em))
     ]
   }))
@@ -141,22 +149,28 @@
     #box(align(left, text(size: 1.5em, fill: rgb("808080"))[*#subtitle*]))
   ]
 
-  // TABLE OF CONTENTS
-  show outline.entry.where(
-    level: 1
-  ): it => {
-    v(1em, weak: true)
-    strong(it)
-  }
-  outline(
-    indent: 1em,
-    title: text(size: 1.2em)[Contents]
-  )
+  // TABLE OF CONTENTS //
 
-  // DIVIDING LINE
+  if toc {
+    show outline.entry.where(
+      level: 1
+    ): it => {
+      v(1em, weak: true)
+      strong(it)
+    }
+    outline(
+      indent: 1em,
+      title: text(size: 1.2em)[Contents]
+    )
+  }
+
+  // DIVIDING LINE //
+  
   v(1em)
-  line(start: (0em, -0.70em), length: 100%, stroke: 0.25em)
-  v(-0.5em)
+  if toc {
+    line(start: (0em, -0.70em), length: 100%, stroke: 0.25em)
+    v(-0.5em)  
+  }
   
   body  
 }
