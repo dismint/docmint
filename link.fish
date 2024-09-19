@@ -9,6 +9,7 @@ set security "/home/dismint/docmint/security"
 set multicore "/home/dismint/docmint/multicore"
 set networks "/home/dismint/docmint/networks"
 set linear "/home/dismint/docmint/linear"
+set comptheory "/home/dismint/docmint/comptheory"
 
 # Create the symbolic link in the target subdirectory
 ln -s $source $biology/(basename $source)
@@ -18,5 +19,6 @@ ln -s $source $security/(basename $source)
 ln -s $source $multicore/(basename $source)
 ln -s $source $networks/(basename $source)
 ln -s $source $linear/(basename $source)
+ln -s $source $comptheory/(basename $source)
 
 echo -e "\n== finished linking template.typ =="

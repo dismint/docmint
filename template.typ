@@ -77,9 +77,9 @@
 
 #let bimg(
   path,
-  width: 10%
+  width: 50%
 ) = {
-  rect(image(path, width: width), stroke: 0.1em, radius: 0.2em)
+  align(center, rect(image(path, width: width), stroke: 0.2em, radius: 0.2em))
 }
 
 // TEMPLATE //
@@ -132,7 +132,7 @@
     if counter(page).at(loc).first() > 1 and pset [
       *#title*
       #h(1fr)
-      Annie Wang
+      Justin Choi
       #box(line(length: 100%, stroke: 0.1em))
     ]
   }))
