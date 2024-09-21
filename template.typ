@@ -26,11 +26,11 @@
     )
   )
 }
-#let example(
-  title: "Example",
+#let walkthrough(
+  title: "Walkthrough",
   body
 ) = {
-  colorbox(title: title, color: "d1cfe2", type: "EXAMPLE")[#body]
+  colorbox(title: title, color: "d1cfe2", type: "WALKTHROUGH")[#body]
 }
 #let define(
   title: "Definition",

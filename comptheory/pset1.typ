@@ -47,7 +47,7 @@ Suppose that $D$ is regular. Then since regular languages are closed under the c
 
 Now let us apply the Pumping Lemma and show that $D$ cannot be regular through a proof by contradiction.
 
-#example(title: "Pumping Lemma")[
+#define(title: "Pumping Lemma")[
   + Let $p$ be the pumping length.
   + Consider the palindrome $0^p 1 0^p$
   + Since $|x y| <= p$ it must be the case that $y$ contains all $0$s
@@ -79,3 +79,24 @@ To show that the language $"TUTU"$ is not regular, use the Pumping Lemma.
 
   Therefore, it cannot be the case that the language $"TUTU"$ is regular.
 ]
+
+= Problem 5
+
+Let us try and find a way to represent the language of strings that $A$ `avoids` $B$ creates. We still want the language to recognize strings that are based in the language $A$ with the restriction they don't contain any substrings of $B$. Represent the language of all strings with a substring of $B$ as $Sigma^* B Sigma^*$. Then the language of strings that avoid any substring of $B$ is $not (Sigma^* B Sigma^*)$ (using $not$ as the complement) which we know is regular since regular languages are closed under the complement.
+
+Then, the language of strings in $A$ that avoid any substring of $B$ can be represented by $A sect (not Sigma^* B Sigma ^*)$. We know that either side of this operation contains a regular language, and regular languages are closed under the intersection operation, thus it must be the case that regular languages are closed under the `avoids` operation.
+
+= Problem 6
+
+Let us create a new DFA $C$ that has states labeled with a pair of states from $A$ and $B$. $C$ will have $k_1 k_2$ states at most, since each state is simple a labeled pair between the original DFAs. Allow there to be labels that are "null" to represent potential cases where you can reach a position from one DFA but not the other. The start state of $C$ is the pair of the start states of $A$ and $B$. Draw transitions between the correct labeled pair when moving from one state to another. What we are doing is similar to the process of creating a DFA from a NFA, where there is a set of states and we transition out of them at unison into another set - only this time the set is always of size two.
+
+To draw the transitions, start at the start state of $C$ and attempt every transition in for each character in the language. If neither of the original DFAs can transition from the current state to another with this character then ignore it. If both can transition out, then draw the transition between the two states in $C$. If only *one* can transition out, then transition to the state with one null label. Once done, continue from all "discovered" states in the same fashion.
+
+In this new graph, label all states that contain an accept state from $A$ *or* an accept state from $B$ as accept states. Because the two languages define in the original DFAs are not the same, there must be one accept state in $C$ that contains null for one of the two original DFAs. This represents the string that is accepted by one DFA but not the other. The length of this string must be less than or equal to the number of states in $C$, which is $k_1 k_2$ since otherwise we should be revisiting a state by the Pigeonhole principle.
+
+Thus, it must be the case that there exists a string that is accepted by one DFA but not the other with length $<=k_1 k_2$
+
+
+
+
+
