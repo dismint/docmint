@@ -10,7 +10,7 @@ set multicore "/home/dismint/docmint/multicore"
 set networks "/home/dismint/docmint/networks"
 set linear "/home/dismint/docmint/linear"
 set comptheory "/home/dismint/docmint/comptheory"
-set comptheory "/home/dismint/docmint/societysystems/"
+set societysystems "/home/dismint/docmint/societysystems"
 
 # Create the symbolic link in the target subdirectory
 ln -s $source $biology/(basename $source)
