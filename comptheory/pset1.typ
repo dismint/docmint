@@ -70,7 +70,7 @@ Thus, since we can find a regular expression for the language, it must be the ca
 
 To show that the language $"TUTU"$ is not regular, use the Pumping Lemma.
 
-#example(title: "Pumping Lemma")[
+#walkthrough(title: "Pumping Lemma")[
   + Let $p$ be the pumping length.
   + Consider the string $0^p 1^p 0^p 1^p$
   + Since $|x y| <= p$ it must be the case that $y$ contains all $0$s.
