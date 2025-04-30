@@ -79,7 +79,7 @@
   path,
   width: 50%
 ) = {
-  align(center, rect(image(path, width: width), stroke: 0.2em, radius: 0.2em))
+  align(center, rect(image(path, width: width), stroke: 0.15em, radius: 0.2em))
 }
 
 // TEMPLATE //
@@ -92,9 +92,14 @@
   body
 ) = {
   // SHOWS //
-  
+
+  set text(size: 0.98em)
   // code block
   let fsize = 0.9em
+  show heading: it => {
+     it;
+     v(0.4em);
+  }
   show raw.where(block: true): it => { set par(justify: false); grid(
     columns: (100%, 100%),
     column-gutter: -100%,
@@ -122,20 +127,20 @@
   set page(
     paper: "a4",
     margin: (
-      x: if pset { 10% } else { 7% },
-      y: if pset { 10% } else { 5% },
+      x: if pset { 14% } else { 7% },
+      y: if pset { 12% } else { 5% },
     ),
     numbering: "1 / 1",
   ) 
   // only set the header on the second page onward
-  set page(header: locate(loc => {
-    if counter(page).at(loc).first() > 1 and pset [
+  set page(header: context {
+    if counter(page).get().first() > 1 and pset [
       *#title*
       #h(1fr)
       Justin Choi
       #box(line(length: 100%, stroke: 0.1em))
     ]
-  }))
+  })
   set par(
     justify: true,
   )

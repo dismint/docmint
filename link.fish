@@ -11,6 +11,7 @@ set networks "/home/dismint/docmint/networks"
 set linear "/home/dismint/docmint/linear"
 set comptheory "/home/dismint/docmint/comptheory"
 set societysystems "/home/dismint/docmint/societysystems"
+set probability "/home/dismint/docmint/probability"
 
 # Create the symbolic link in the target subdirectory
 ln -s $source $biology/(basename $source)
@@ -22,5 +23,6 @@ ln -s $source $networks/(basename $source)
 ln -s $source $linear/(basename $source)
 ln -s $source $comptheory/(basename $source)
 ln -s $source $societysystems/(basename $source)
+ln -s $source $probability/(basename $source)
 
 echo -e "\n== finished linking template.typ =="
